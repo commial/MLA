@@ -19,8 +19,7 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-    - name: Build AFL
-      run: cargo install afl && cargo afl build
+        components: rustfmt, clippy, afl
     - name: Build
       run: cargo build --release --all-features --verbose
     - name: Run tests
