@@ -20,6 +20,8 @@ jobs:
       with:
         toolchain: stable
         components: rustfmt, clippy, afl
+    - name: Install dependencies
+      run: sudo apt-get install llvm
     - name: Build
       run: cargo build --release --all-features --verbose
     - name: Run tests
