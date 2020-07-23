@@ -16,7 +16,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - name: Build AFL
+      run: cargo afl build
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --release --all-features --verbose
     - name: Run tests
       run: cargo test --release --verbose
