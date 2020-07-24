@@ -25,7 +25,8 @@ jobs:
       with:
         args: >
           bash -c
-          "apt-get update &&
+          "set-x &&
+          apt-get update &&
           apt-get install -y curl llvm build-essential &&
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
