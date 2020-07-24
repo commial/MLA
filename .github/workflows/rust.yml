@@ -22,7 +22,7 @@ jobs:
     - name: Build
       run: cargo build --release --all-features --all --exclude mla-fuzz-afl --verbose
     - name: Run tests
-      run: cargo test --release --verbose
+      run: cargo test --all --exclude mla-fuzz-afl --release --verbose
  
   afl-build:
     runs-on: ubuntu-latest
