@@ -26,7 +26,7 @@ jobs:
         args: >
           bash -c
           "apt-get update &&
-          apt-get install -y curl &&
+          apt-get install -y curl llvm &&
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
           /tmp/install.sh -y &&
