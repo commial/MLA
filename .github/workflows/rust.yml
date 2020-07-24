@@ -14,17 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
-
-    - uses: docker://arm64v8/rust:latest
+    
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
-        args: '/usr/bin/uname -a'
+        args: "uname -a"
 
     - uses: actions/checkout@v1
     
-    - uses: docker://arm64v8/rust:latest
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
         args: >
           bash -c
-          "ls &&
+          "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh &&
+          rustup show &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
