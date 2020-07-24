@@ -27,7 +27,9 @@ jobs:
           bash -c
           "apt-get update &&
           apt-get install -y curl &&
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh &&
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
+          chmod +x /tmp/install.sh &&
+          /tmp/install.sh -y &&
           rustup show &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
