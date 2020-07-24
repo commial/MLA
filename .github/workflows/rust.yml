@@ -15,7 +15,7 @@ jobs:
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
 
-    - uses: docker://multiarch/ubuntu-core:arm64-bionic
+    - uses: docker://arm64v8/rust:latest
       with:
         args: 'uname -a'
 
