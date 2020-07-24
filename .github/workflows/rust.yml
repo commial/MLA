@@ -20,6 +20,15 @@ jobs:
         args: "uname -a"
 
     - uses: actions/checkout@v1
+      
+    - name: Cache crates compilation
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-crates-compilation
+      with:
+        # cargo cache files are stored in `target/release`
+        path: target/release
+        key: build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.toml') }}
     
     - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
