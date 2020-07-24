@@ -20,3 +20,11 @@ jobs:
         args: 'uname -a'
 
     - uses: actions/checkout@v1
+    
+    - uses: docker://arm64v8/rust:latest
+      with:
+        args: >
+          bash -c
+          "ls &&
+          cargo build --release --verbose --all --exclude mla-fuzz-afl &&
+          cargo test --release --verbose --all --exclude mla-fuzz-afl"
