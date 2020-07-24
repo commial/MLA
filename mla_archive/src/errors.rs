@@ -56,7 +56,7 @@ pub enum Error {
     /// An error happens in the configuration
     ConfigError(ConfigError),
     /// Filename already used
-    DuplicateFilename,
+    DuplicateFilename
     /// Wrong tag while decrypting authenticated data
     AuthenticatedDecryptionWrongTag,
     /// Unable to expand while using the HKDF
