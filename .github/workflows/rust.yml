@@ -19,17 +19,30 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-    - name: Install dependencies
-      run: sudo apt-get install llvm
-    - name: Install cargo afl
-      run: cargo install afl
     - name: Build
       run: cargo build --release --all-features --verbose
-    - name: Test AFL build
-      run: cargo afl build
     - name: Run tests
       run: cargo test --release --verbose
-  
+ 
+  afl-build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install dependencies
+        run: sudo apt-get install llvm
+      - name: Install cargo-audit binary crate
+        uses: actions-rs/install@v0.1
+        with:
+          crate: afl
+          version: latest
+          use-tool-cache: true
+      - name: Test AFL build
+        run: cargo afl build
+ 
   fmt:
     runs-on: ubuntu-latest
     steps:
