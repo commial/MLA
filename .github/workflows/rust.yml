@@ -28,8 +28,10 @@ jobs:
         cache-name: cache-crates-compilation
       with:
         # cargo cache files are stored in `target/release`
-        path: target/release
+        path: target
         key: build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.toml') }}
+        restore-keys: |
+            build-${{ env.cache-name }}-
     
     - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
