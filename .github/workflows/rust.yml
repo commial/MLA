@@ -30,6 +30,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
           /tmp/install.sh -y &&
+          source $HOME/.cargo/env &&
           rustup show &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
