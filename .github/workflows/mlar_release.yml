@@ -38,10 +38,7 @@ jobs:
       uses: actions-rs/cargo@v1
       with:
         command: build
-        args: --release --all-features --all --exclude mla-fuzz-afl --verbose ${{ matrix.cargo_build }}
-    - name: Strip resulting binary
-      if: matrix.build == 'linux'
-      run: strip ./target/release/mlar${{ matrix.extension }}
+        args: --release --all-features --package mlar --verbose ${{ matrix.cargo_build }}
     - name: Upload resulting 'mlar'
       uses: actions/upload-artifact@v1
       with:
