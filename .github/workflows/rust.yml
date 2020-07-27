@@ -30,7 +30,7 @@ jobs:
           target: aarch64-unknown-linux-gnu
     
     - name: Install dependencies
-      run: sudo apt-get install aarch64-linux-gnu-gcc
+      run: sudo apt-get install gcc-aarch64-linux-gnu
     
     - name: Cross-build
       env:
