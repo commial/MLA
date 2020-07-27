@@ -23,7 +23,8 @@ jobs:
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
     
-    - uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic  
+    - name: ${{ matrix.build }}
+      uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic  
       with:
         args: "uname -a"
 
