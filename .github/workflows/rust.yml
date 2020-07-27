@@ -16,7 +16,9 @@ jobs:
         build: [armfh, arm64]
         include:
           - build: armfh
+            image: docker://multiarch/ubuntu-core:armfh-bionic
           - build: arm64
+            image: docker://multiarch/ubuntu-core:arm64-bionic
 
     runs-on: ubuntu-latest
 
@@ -24,7 +26,7 @@ jobs:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
     
     - name: ${{ matrix.build }}
-      uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic  
+      uses: ${{ matrix.image }}
       with:
         args: "uname -a"
 
