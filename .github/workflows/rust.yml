@@ -43,7 +43,7 @@ jobs:
       run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
       
     - name: Backup Cargo cache for later use
-      run: mkdir cache && mv .cargo/git .cargo/registry cache
+      run: mkdir ~/cache && mv ~/.cargo/git ~/.cargo/registry ~/cache
     
     - name: DEBUG
       run: pwd && ls -ahl
