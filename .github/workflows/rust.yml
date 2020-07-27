@@ -4,69 +4,70 @@ on:
   push:
     branches: [ master ]
   pull_request:
-    branches: [ master ]
+    branches: [ master ]   
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
-    runs-on: ${{matrix.os}}
+  
+  # For some reasons, matrix cannot be used in "uses" statement, so duplicate it
+  build-arm64:
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
+    
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic 
+      with:
+        args: "uname -a"
+
+    - uses: actions/checkout@v1
+      
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: stable
-    - name: Build
-      uses: actions-rs/cargo@v1
+          toolchain: stable
+          target: aarch64-unknown-linux-gnu
+    
+    - name: Install dependencies
+      run: sudo apt-get install gcc-aarch64-linux-gnu
+    
+    - name: Cross-build
+      env:
+        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
+        CARGO_BUILD_DEP_INFO_BASEDIR: .
+      run: cargo build --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
+    
+    - name: Cross-build tests
+      env:
+        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc
+        CARGO_BUILD_DEP_INFO_BASEDIR: .
+      run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
+      
+    - name: Backup Cargo cache for later use
+      run: echo ~/.cargo/registry && mv ~/.cargo/registry /home/runner/work/_temp/_github_home/registry_cache
+    
+    - name: DEBUG
+      run: pwd && ls -ahl && ls -ahl /usr/share/rust/.cargo
+    
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
-        command: build
-        args: --release --all-features --all --exclude mla-fuzz-afl --verbose
-    - name: Run tests
-      run: cargo test --all --exclude mla-fuzz-afl --release --verbose
+        args: >
+          bash -c
+          "set -x &&
+          echo 'Install rust components' &&
+          apt-get update &&
+          apt-get install -y curl llvm build-essential &&
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
+          chmod +x /tmp/install.sh &&
+          /tmp/install.sh -y &&
+          echo 'Current toolchain:' &&
+          source $HOME/.cargo/env &&
+          rustup show &&
+          echo 'Get back cache' &&
+          mkdir -p /home/runner/work/MLA/MLA &&
+          mv ./target /home/runner/work/MLA/MLA &&
+          pwd && ls -ahl && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry && ls -ahl /home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu &&
+          echo 'Launch tests' &&
+          CARGO_BUILD_TARGET_DIR=/home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu CARGO_BUILD_DEP_INFO_BASEDIR=\".\" cargo test --frozen --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
-  afl-build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Install dependencies
-        run: sudo apt-get install llvm
-      - name: Install cargo-afl binary crate
-        uses: actions-rs/install@v0.1
-        with:
-          crate: afl
-          version: latest
-          use-tool-cache: true
-      - name: Test AFL build
-        run: cargo afl build
-
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt
-      - name: Check format
-        run: cargo fmt --all -- --check
-
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Security audit
-        uses: actions-rs/audit-check@v1
-        with:
-         token: ${{ secrets.GITHUB_TOKEN }}
