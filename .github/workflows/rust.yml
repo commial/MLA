@@ -11,18 +11,19 @@ env:
 
 jobs:
   build:
-    
     strategy:
       matrix:
-        os:
-        - arm64
-        - armhf
+        build: [armfh, arm64]
+        include:
+          - build: armfh
+          - build: arm64
+
     runs-on: ubuntu-latest
 
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
     
-    - uses: docker://multiarch/ubuntu-core:${{ matrix.os }}-bionic  
+    - uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic  
       with:
         args: "uname -a"
 
@@ -35,11 +36,11 @@ jobs:
       with:
         # cargo cache files are stored in `target/release`
         path: target
-        key: build-${{ env.cache-name }}-${{ matrix.os }}-${{ hashFiles('**/Cargo.toml') }}
+        key: build-${{ env.cache-name }}-${{ matrix.build }}-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
-            build-${{ env.cache-name }}-${{ matrix.os }}-
+            build-${{ env.cache-name }}-${{ matrix.build }}-
     
-    - uses: docker://multiarch/ubuntu-core:${{ matrix.os }}-bionic
+    - uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic
       with:
         args: >
           bash -c
