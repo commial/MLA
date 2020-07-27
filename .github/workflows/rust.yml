@@ -35,15 +35,15 @@ jobs:
     - name: Cross-build
       env:
         RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
-      run: cargo build --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
+      run: cargo build --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
     
     - name: Cross-build tests
       env:
         RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
-      run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
+      run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
       
     - name: Backup Cargo cache for later use
-      run: mkdir ~/cache && mv ~/.cargo/git ~/.cargo/registry ~/cache
+      run: mkdir ~/cache && mv ~/.cargo/registry ~/cache
     
     - name: DEBUG
       run: pwd && ls -ahl
@@ -65,7 +65,6 @@ jobs:
           echo 'Get back cache' &&
           pwd && ls -ahl && ls -ahl target/ &&
           mv /github/home/cache/registry /github/home/.cargo/registry &&
-          mv /github/home/cache/git /github/home/.cargo/git &&
           echo 'Launch tests' &&
           cargo test --offline --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
