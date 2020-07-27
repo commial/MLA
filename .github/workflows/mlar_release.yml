@@ -6,13 +6,7 @@ on:
       - "mlar-v*"
 
 env:
-  RELEASE_BIN: wrangler
-  RELEASE_DIR: artifacts
   GITHUB_REF: "${{ github.ref }}"
-  LINUX_TARGET: x86_64-unknown-linux-musl
-
-  # Space separated paths to include in the archive.
-  RELEASE_ADDS: README.md
 
 jobs:
   build:
@@ -45,8 +39,9 @@ jobs:
       with:
         command: build
         args: --release --all-features --all --exclude mla-fuzz-afl --verbose ${{ matrix.cargo_build }}
-    - name: Run tests
-      run: cargo test --all --exclude mla-fuzz-afl --release --verbose
+    - name: Strip resulting binary
+      if: matrix.build == 'linux'
+      run: strip ./target/release/mlar${{ matrix.extension }}
     - name: Upload resulting 'mlar'
       uses: actions/upload-artifact@v1
       with:
@@ -73,11 +68,22 @@ jobs:
         with:
           tag_name: mlar-${{ steps.get_version.outputs.VERSION }}
           release_name: mlar-${{ steps.get_version.outputs.VERSION }}
+          draft: true
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v1
         with:
           name: mlar-linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v1
+        with:
+          name: mlar-windows
+
+      - name: Download MacOS artifact
+        uses: actions/download-artifact@v1
+        with:
+          name: mlar-macos
 
       - name: Release Linux artifact
         uses: actions/upload-release-asset@v1
@@ -85,14 +91,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar
+          asset_path: ./mlar-linux
           asset_content_type: application/octet-stream
           asset_name: mlar-linux-static-${{ steps.get_version.outputs.VERSION }}
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: mlar-windows
 
       - name: Release Windows artifact
         uses: actions/upload-release-asset@v1
@@ -100,14 +101,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar.exe
+          asset_path: ./mlar-windows
           asset_content_type: application/octet-stream
           asset_name: mlar-windows-${{ steps.get_version.outputs.VERSION }}
-
-      - name: Download MacOS artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: mlar-macos
 
       - name: Release MacOS artifact
         uses: actions/upload-release-asset@v1
@@ -115,6 +111,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar
+          asset_path: ./mlar-macos
           asset_content_type: application/octet-stream
           asset_name: mlar-macos-${{ steps.get_version.outputs.VERSION }}
