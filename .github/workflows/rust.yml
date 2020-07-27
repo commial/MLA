@@ -10,23 +10,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        build: [armfh, arm64]
-        include:
-          - build: armfh
-            image: docker://multiarch/ubuntu-core:armfh-bionic
-          - build: arm64
-            image: docker://multiarch/ubuntu-core:arm64-bionic
-
+  build-armfh:
     runs-on: ubuntu-latest
 
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
     
-    - name: ${{ matrix.build }}
-      uses: ${{ matrix.image }}
+    - uses: docker://multiarch/ubuntu-core:armfh-bionic
       with:
         args: "uname -a"
 
@@ -39,11 +29,11 @@ jobs:
       with:
         # cargo cache files are stored in `target/release`
         path: target
-        key: build-${{ env.cache-name }}-${{ matrix.build }}-${{ hashFiles('**/Cargo.toml') }}
+        key: build-${{ env.cache-name }}-armfh-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
-            build-${{ env.cache-name }}-${{ matrix.build }}-
+            build-${{ env.cache-name }}-armfh-
     
-    - uses: docker://multiarch/ubuntu-core:${{ matrix.build }}-bionic
+    - uses: docker://multiarch/ubuntu-core:armfh-bionic
       with:
         args: >
           bash -c
@@ -60,3 +50,46 @@ jobs:
           # Launch build and tests &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
+  
+  # For some reasons, matrix cannot be used in "uses" statement, so duplicate it
+  build-arm64:
+    runs-on: ubuntu-latest
+
+    steps:
+    - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
+    
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic
+      with:
+        args: "uname -a"
+
+    - uses: actions/checkout@v1
+      
+    - name: Cache crates compilation
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-crates-compilation
+      with:
+        # cargo cache files are stored in `target/release`
+        path: target
+        key: build-${{ env.cache-name }}-arm64-${{ hashFiles('**/Cargo.toml') }}
+        restore-keys: |
+            build-${{ env.cache-name }}-arm64-
+    
+    - uses: docker://multiarch/ubuntu-core:arm64-bionic
+      with:
+        args: >
+          bash -c
+          "set -x &&
+          # Install rust components &&
+          apt-get update &&
+          apt-get install -y curl llvm build-essential &&
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
+          chmod +x /tmp/install.sh &&
+          /tmp/install.sh -y &&
+          # Show the current toolchain &&
+          source $HOME/.cargo/env &&
+          rustup show &&
+          # Launch build and tests &&
+          cargo build --release --verbose --all --exclude mla-fuzz-afl &&
+          cargo test --release --verbose --all --exclude mla-fuzz-afl"
+
