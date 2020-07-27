@@ -43,7 +43,7 @@ jobs:
       run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
       
     - name: Backup Cargo cache for later use
-      run: mkdir ~/cache && mv ~/.cargo/registry ~/cache
+      run: echo ~/.cargo && mv ~/.cargo /home/runner/work/_temp/_github_home/
     
     - name: DEBUG
       run: pwd && ls -ahl
@@ -63,8 +63,7 @@ jobs:
           source $HOME/.cargo/env &&
           rustup show &&
           echo 'Get back cache' &&
-          pwd && ls -ahl && ls -ahl target/ &&
-          mv /github/home/cache/registry /github/home/.cargo/registry &&
+          pwd && ls -ahl && ls -ahl target/ && ls -ahl ~/.cargo &&
           echo 'Launch tests' &&
           cargo test --offline --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
