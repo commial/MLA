@@ -29,13 +29,18 @@ jobs:
           toolchain: stable
           target: aarch64-unknown-linux-gnu
     
+    - name: Install dependencies
+      run: sudo apt-get install aarch64-linux-gnu-gcc
+    
     - name: Cross-build
-      run: cargo build --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
-      continue-on-error: true
+      env:
+        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
+      run: cargo build --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
     
     - name: Cross-build tests
+      env:
+        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
       run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
-      continue-on-error: true
     
     - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
@@ -51,8 +56,6 @@ jobs:
           echo 'Current toolchain:' &&
           source $HOME/.cargo/env &&
           rustup show &&
-          echo 'Launch build and tests' &&
-          ls -ahl &&
-          cargo build --release --verbose --all --exclude mla-fuzz-afl &&
-          cargo test --release --verbose --all --exclude mla-fuzz-afl"
+          echo 'Launch tests' &&
+          cargo test --offline --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
