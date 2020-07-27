@@ -38,16 +38,16 @@ jobs:
         args: >
           bash -c
           "set -x &&
-          echo "Install rust components" &&
+          echo 'Install rust components' &&
           apt-get update &&
           apt-get install -y curl llvm build-essential &&
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
           /tmp/install.sh -y &&
-          echo "Current toolchain:" &&
+          echo 'Current toolchain:' &&
           source $HOME/.cargo/env &&
           rustup show &&
-          echo "Launch build and tests"
+          echo 'Launch build and tests' &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
   
@@ -80,16 +80,16 @@ jobs:
         args: >
           bash -c
           "set -x &&
-          echo "Install rust components" &&
+          echo 'Install rust components' &&
           apt-get update &&
           apt-get install -y curl llvm build-essential &&
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
           /tmp/install.sh -y &&
-          echo "Current toolchain:" &&
+          echo 'Current toolchain:' &&
           source $HOME/.cargo/env &&
           rustup show &&
-          echo "Launch build and tests"
+          echo 'Launch build and tests' &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
 
