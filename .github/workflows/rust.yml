@@ -46,7 +46,7 @@ jobs:
       run: echo ~/.cargo/registry && mv ~/.cargo/registry /home/runner/work/_temp/_github_home/registry_cache
     
     - name: DEBUG
-      run: pwd && ls -ahl && ls -ahl ~/.cargo
+      run: pwd && ls -ahl && ls -ahl /usr/share/rust/.cargo
     
     - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
@@ -65,7 +65,7 @@ jobs:
           echo 'Get back cache' &&
           mkdir -p /home/runner/work/MLA/MLA &&
           mv ./target /home/runner/work/MLA/MLA &&
-          pwd && ls -ahl && ls -ahl target/ && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry &&
+          pwd && ls -ahl && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry &&
           echo 'Launch tests' &&
           CARGO_BUILD_TARGET_DIR=/home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu cargo test --frozen --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
