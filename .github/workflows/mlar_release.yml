@@ -85,13 +85,16 @@ jobs:
         with:
           name: mlar-macos
 
+      - name: DEBUG
+        run: ls -ahl ./mlar-linux
+
       - name: Release Linux artifact
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar-linux
+          asset_path: ./mlar-linux/mlar
           asset_content_type: application/octet-stream
           asset_name: mlar-linux-static-${{ steps.get_version.outputs.VERSION }}
 
@@ -101,7 +104,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar-windows
+          asset_path: ./mlar-windows/mlar.exe
           asset_content_type: application/octet-stream
           asset_name: mlar-windows-${{ steps.get_version.outputs.VERSION }}
 
@@ -111,6 +114,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mlar-macos
+          asset_path: ./mlar-macos/mlar
           asset_content_type: application/octet-stream
           asset_name: mlar-macos-${{ steps.get_version.outputs.VERSION }}
