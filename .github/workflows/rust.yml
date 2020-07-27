@@ -12,11 +12,15 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        arch: [arm64, armhf]
 
     steps:
     - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
     
-    - uses: docker://multiarch/ubuntu-core:arm64-bionic  
+    - uses: docker://multiarch/ubuntu-core:${{ matrix.arch }}-bionic  
       with:
         args: "uname -a"
 
@@ -29,21 +33,24 @@ jobs:
       with:
         # cargo cache files are stored in `target/release`
         path: target
-        key: build-${{ env.cache-name }}-${{ hashFiles('**/Cargo.toml') }}
+        key: build-${{ env.cache-name }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
-            build-${{ env.cache-name }}-
+            build-${{ env.cache-name }}-${{ matrix.arch }}-
     
-    - uses: docker://multiarch/ubuntu-core:arm64-bionic
+    - uses: docker://multiarch/ubuntu-core:${{ matrix.arch }}-bionic
       with:
         args: >
           bash -c
           "set -x &&
+          # Install rust components &&
           apt-get update &&
           apt-get install -y curl llvm build-essential &&
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
           chmod +x /tmp/install.sh &&
           /tmp/install.sh -y &&
+          # Show the current toolchain &&
           source $HOME/.cargo/env &&
           rustup show &&
+          # Launch build and tests &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
