@@ -10,46 +10,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-armhf:
-    runs-on: ubuntu-latest
-
-    steps:
-    - run: docker run --rm --privileged multiarch/qemu-user-static:register --reset
-    
-    - uses: docker://multiarch/ubuntu-core:armhf-bionic
-      with:
-        args: "uname -a"
-
-    - uses: actions/checkout@v1
-      
-    - name: Cache crates compilation
-      uses: actions/cache@v2
-      env:
-        cache-name: cache-crates-compilation
-      with:
-        # cargo cache files are stored in `target/release`
-        path: target
-        key: build-${{ env.cache-name }}-armhf-${{ hashFiles('**/Cargo.toml') }}
-        restore-keys: |
-            build-${{ env.cache-name }}-armhf-
-    
-    - uses: docker://multiarch/ubuntu-core:armhf-bionic
-      with:
-        args: >
-          bash -c
-          "set -x &&
-          echo 'Install rust components' &&
-          apt-get update &&
-          apt-get install -y curl llvm build-essential &&
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/install.sh &&
-          chmod +x /tmp/install.sh &&
-          /tmp/install.sh -y &&
-          echo 'Current toolchain:' &&
-          source $HOME/.cargo/env &&
-          rustup show &&
-          echo 'Launch build and tests' &&
-          cargo build --release --verbose --all --exclude mla-fuzz-afl &&
-          cargo test --release --verbose --all --exclude mla-fuzz-afl"
   
   # For some reasons, matrix cannot be used in "uses" statement, so duplicate it
   build-arm64:
@@ -64,16 +24,17 @@ jobs:
 
     - uses: actions/checkout@v1
       
-    - name: Cache crates compilation
-      uses: actions/cache@v2
-      env:
-        cache-name: cache-crates-compilation
+    - uses: actions-rs/toolchain@v1
       with:
-        # cargo cache files are stored in `target/release`
-        path: target
-        key: build-${{ env.cache-name }}-arm64-${{ hashFiles('**/Cargo.toml') }}
-        restore-keys: |
-            build-${{ env.cache-name }}-arm64-
+          target: aarch64-unknown-linux-gnu
+    
+    - name: Cross-build
+      run: cargo build --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
+      continue-on-error: true
+    
+    - name: Cross-build tests
+      run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl
+      continue-on-error: true
     
     - uses: docker://multiarch/ubuntu-core:arm64-bionic
       with:
@@ -90,6 +51,7 @@ jobs:
           source $HOME/.cargo/env &&
           rustup show &&
           echo 'Launch build and tests' &&
+          ls -ahl &&
           cargo build --release --verbose --all --exclude mla-fuzz-afl &&
           cargo test --release --verbose --all --exclude mla-fuzz-afl"
 
