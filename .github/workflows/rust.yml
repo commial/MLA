@@ -35,11 +35,13 @@ jobs:
     - name: Cross-build
       env:
         RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
+        CARGO_BUILD_DEP_INFO_BASEDIR: .
       run: cargo build --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
     
     - name: Cross-build tests
       env:
-        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc 
+        RUSTFLAGS: -C linker=aarch64-linux-gnu-gcc
+        CARGO_BUILD_DEP_INFO_BASEDIR: .
       run: cargo test --no-run --target aarch64-unknown-linux-gnu --all --release --exclude mla-fuzz-afl --verbose
       
     - name: Backup Cargo cache for later use
@@ -65,7 +67,7 @@ jobs:
           echo 'Get back cache' &&
           mkdir -p /home/runner/work/MLA/MLA &&
           mv ./target /home/runner/work/MLA/MLA &&
-          pwd && ls -ahl && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry &&
+          pwd && ls -ahl && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry && ls -ahl /home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu &&
           echo 'Launch tests' &&
-          CARGO_BUILD_TARGET_DIR=/home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu cargo test --frozen --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
+          CARGO_BUILD_TARGET_DIR=/home/runner/work/MLA/MLA/target/aarch64-unknown-linux-gnu CARGO_BUILD_DEP_INFO_BASEDIR=\".\" cargo test --frozen --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
