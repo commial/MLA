@@ -63,7 +63,7 @@ jobs:
           source $HOME/.cargo/env &&
           rustup show &&
           echo 'Get back cache' &&
-          pwd && ls -ahl && ls -ahl target/ && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry
+          pwd && ls -ahl && ls -ahl target/ && ls -ahl ~/.cargo && mv ~/registry_cache ~/.cargo/registry &&
           echo 'Launch tests' &&
           cargo test --offline --release --verbose --all --exclude mla-fuzz-afl --target aarch64-unknown-linux-gnu"
 
