@@ -31,6 +31,8 @@ jobs:
       with:
         toolchain: stable
     - name: Build
+      env:
+        RUSTFLAGS: -D warnings
       uses: actions-rs/cargo@v1
       with:
         command: build
