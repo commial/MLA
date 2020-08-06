@@ -35,6 +35,8 @@ jobs:
       with:
         command: build
         args: --release --all-features --all --exclude mla-fuzz-afl --verbose
+        env:
+          RUSTFLAGS: -D warnings
     - name: Run tests
       run: cargo test --all --exclude mla-fuzz-afl --release --verbose
     - name: Upload resulting 'mlar'
