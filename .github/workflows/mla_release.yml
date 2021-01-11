@@ -19,17 +19,24 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             cargo_build: --target x86_64-unknown-linux-musl
-            result_name: libmla.a
+            path: |
+              ./target/x86_64-unknown-linux-musl/release/libmla.a
           - build: windows-i686
             os: windows-latest
             target: i686-pc-windows-msvc
             msvc_platform: Win32
-            result_name: mla.lib
+            path: |
+              ./target/i686-pc-windows-msvc/release/mla.lib
+              ./target/i686-pc-windows-msvc/release/mla.dll
+              ./target/i686-pc-windows-msvc/release/mla.pdb
           - build: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             msvc_platform: x64
-            result_name: mla.lib
+            path: |
+              ./target/x86_64-pc-windows-msvc/release/mla.lib
+              ./target/x86_64-pc-windows-msvc/release/mla.dll
+              ./target/x86_64-pc-windows-msvc/release/mla.pdb
 
     runs-on: ${{ matrix.os }}
 
@@ -48,19 +55,12 @@ jobs:
         args: --release --manifest-path=bindings/C/Cargo.toml --target=${{ matrix.target }}
     - name: Strip resulting binary
       if: matrix.os == 'ubuntu-latest'
-      run: strip ./target/${{ matrix.target }}/release/${{ matrix.result_name }}
+      run: strip ${{ matrix.path }}
     - name: Upload resulting 'mla'
-      if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v1
       with:
         name: mla-${{ matrix.build }}
-        path: ./target/${{ matrix.target }}/release/${{ matrix.result_name }}
+        path: ${{ matrix.path }}
     - name: DEBUG
       if: matrix.os == 'windows-latest'
       run: dir ./target/${{ matrix.target }}/release/
-    - name: Upload resulting 'mla'
-      if: matrix.os == 'windows-latest'
-      uses: actions/upload-artifact@v1
-      with:
-        name: mla-${{ matrix.build }}
-        path: ./target/${{ matrix.target }}/release/${{ matrix.result_name }}
