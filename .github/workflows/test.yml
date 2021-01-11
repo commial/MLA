@@ -19,9 +19,9 @@ jobs:
       with:
         toolchain: stable
     - uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: cbindgen
+      with:
+        command: install
+        args: cbindgen
     # Assert .h and .hpp bindings files are the ones generated
     - name: Test C header
       working-directory: bindings/C
