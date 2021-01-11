@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-enum MLAStatus {
+enum MLAStatus  {
   MLA_STATUS_SUCCESS = 0,
   MLA_STATUS_IO_ERROR = 65536,
   MLA_STATUS_WRONG_MAGIC = 131072,
