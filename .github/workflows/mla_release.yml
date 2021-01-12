@@ -139,26 +139,6 @@ jobs:
           asset_content_type: application/octet-stream
           asset_name: libmla-x86_64-static-${{ steps.get_version.outputs.VERSION }}.a
 
-      - name: Release C Header file
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./bindings/C/mla.h
-          asset_content_type: application/octet-stream
-          asset_name: mla.h
-
-      - name: Release CPP Header file
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./bindings/C/mla.hpp
-          asset_content_type: application/octet-stream
-          asset_name: mla.hpp
-
       - name: Zip Windows releases
         run: |
           zip --junk-paths windows-i686 mla-windows-i686/mla.dll mla-windows-i686/mla.lib mla-windows-i686/mla.dll.lib mla-windows-i686/mla.pdb
@@ -205,3 +185,25 @@ jobs:
           asset_path: ./windows-x86_64-debug.zip
           asset_content_type: application/zip
           asset_name: libmla-windows-x86_64-debug-${{ steps.get_version.outputs.VERSION }}.zip
+
+      - uses: actions/checkout@v2
+      - name: Release C Header file
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./bindings/C/mla.h
+          asset_content_type: application/octet-stream
+          asset_name: mla.h
+
+      - name: Release CPP Header file
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./bindings/C/mla.hpp
+          asset_content_type: application/octet-stream
+          asset_name: mla.hpp
+
