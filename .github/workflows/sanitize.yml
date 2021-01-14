@@ -33,7 +33,7 @@ jobs:
     # Ensure CHANGELOGs respect the KeepAChangelog format
     strategy:
       matrix:
-        changelog: [curve25519-parser, mla, mlar, bindings-C]
+        changelog: [curve25519-parser, mla, mlar]
         include:
           - changelog: curve25519-parser
             path: curve25519-parser
@@ -41,9 +41,7 @@ jobs:
             path: mla
           - changelog: mlar
             path: mlar
-          - changelog: bindings-C
-            path: bindings/C
-
+          
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
