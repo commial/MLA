@@ -57,4 +57,6 @@ jobs:
           echo -e "\e[1mVersion\e[0m ${{ steps.changelog_reader.outputs.version }}"
           echo -e "\e[1mStatus\e[0m ${{ steps.changelog_reader.outputs.status }}"
           echo -en "\e[1mBody\e[0m"
-          echo "${{ steps.changelog_reader.outputs.changes }}"
+          cat << 'EOF'
+          ${{ steps.changelog_reader.outputs.changes }}
+          EOF
