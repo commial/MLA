@@ -1110,14 +1110,14 @@ impl<'b, R: 'b + Read> ArchiveFailSafeReader<'b, R> {
                                 let mut buf = Vec::with_capacity(CACHE_SIZE);
                                 'buf_fill: loop {
                                     // Read bytes one per one to take the maximum of it
-                                    let mut mini_buf = [0u8; 1];
+                                    let mut mini_buf = [0u8; 100];
                                     match src.read(&mut mini_buf) {
                                         Ok(read) => {
                                             if read == 0 {
                                                 // EOF
                                                 break 'buf_fill;
                                             }
-                                            buf.push(mini_buf[0]);
+                                            buf.extend(&mini_buf[0 .. read]);
                                         }
                                         Err(err) => {
                                             // Stop reconstruction
