@@ -38,6 +38,7 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: 1.69
+        default: true
         target: ${{ matrix.target }}
     - uses: microsoft/setup-msbuild@v1.0.2
     - name: Compile C/CPP bindings test program for Windows
