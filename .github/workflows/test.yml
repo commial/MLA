@@ -37,7 +37,7 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.69
+        toolchain: 1.70
         default: true
         target: ${{ matrix.target }}
     - uses: microsoft/setup-msbuild@v1.0.2
