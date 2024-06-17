@@ -6,7 +6,7 @@ edition = "2018"
 
 [lib]
 name = "mla"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 mla = { path = "../../mla", version = "1" }

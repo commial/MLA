@@ -9,10 +9,6 @@ homepage = "https://github.com/ANSSI-FR/MLA"
 repository = "https://github.com/ANSSI-FR/MLA"
 readme = "../README.md"
 
-[lib]
-crate-type = ["staticlib"]
-
-
 [dependencies]
 rand = { version = "0.8", default-features = false, features = ["getrandom", "std"]}
 rand_chacha = { version = "0.3", default-features = false}
