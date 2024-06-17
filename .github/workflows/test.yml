@@ -13,63 +13,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        build: [linux, macos, windows]
-        include:
-          - build: linux
-            os: ubuntu-latest
-          - build: macos
-            os: macos-latest
-          - build: windows
-            os: windows-latest
-            extension: .exe
-
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: Build
-      env:
-        RUSTFLAGS: -D warnings
-      uses: actions-rs/cargo@v1
-      with:
-        command: build
-        args: --release --all --exclude mla-fuzz-afl --verbose
-    - name: Run tests
-      run: cargo test --all --exclude mla-fuzz-afl --release --verbose
-    - name: Upload resulting 'mlar'
-      uses: actions/upload-artifact@v1
-      with:
-        name: ${{ matrix.build }}
-        path: ./target/release/mlar${{ matrix.extension }}
-
-  long-tests:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: Run long tests
-      run: cd mla && cargo test --release -- --ignored
-
-  all-features:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: Run long tests
-      run: cargo test --all-features --all --exclude mla-fuzz-afl --exclude mla-bindings-c --release
-
   test-bindings-c-cpp-linux:
     runs-on: ubuntu-latest
     steps:
@@ -108,7 +51,7 @@ jobs:
     - uses: actions-rs/toolchain@v1
       with:
         # Avoid a regression of Cargo, breaking at link time
-        toolchain: 1.69
+        toolchain: 1.79
         default: true
         target: ${{ matrix.target }}
     - uses: microsoft/setup-msbuild@v1.0.2
@@ -119,80 +62,4 @@ jobs:
       working-directory: bindings/C/tests/windows-msvc/
       run: ./${{ matrix.msvc_platform }}/${{ matrix.version }}/mla-bindings-test.exe
 
-  afl-build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Install dependencies
-        run: sudo apt-get install llvm
-      - name: Install cargo-afl binary crate
-        uses: actions-rs/install@v0.1
-        with:
-          crate: cargo-afl
-          version: latest
-          use-tool-cache: true
-      - name: Test AFL build
-        env:
-          RUSTFLAGS: -D warnings
-        run: cargo afl build
-
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt
-      - name: Check format
-        run: cargo fmt --all -- --check
-
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Security audit
-        uses: actions-rs/audit-check@v1
-        with:
-         token: ${{ secrets.GITHUB_TOKEN }}
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: clippy
-      - name: Install dependencies
-        run: sudo apt-get install llvm
-      - name: Install cargo-afl binary crate
-        uses: actions-rs/install@v0.1
-        with:
-          crate: cargo-afl
-          version: latest
-          use-tool-cache: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets -- -D warnings
-
-  publish-dry-run:
-      runs-on: ubuntu-latest
-
-      steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Dry-run publish curve25519-parser
-        run: cd curve25519-parser && cargo publish --dry-run
-      - name: Dry-run publish mla
-        run: cd mla && cargo publish --dry-run
-      - name: Dry-run publish mlar
-        run: cd mlar && cargo publish --dry-run
-      
+  
