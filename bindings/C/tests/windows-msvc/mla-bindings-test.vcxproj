@@ -219,7 +219,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)\..\..\..\..\target\i686-pc-windows-msvc\release</AdditionalLibraryDirectories>
-      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib;ntdll.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if not exist "$(SolutionDir)\..\..\..\..\target\i686-pc-windows-msvc\release\mla.lib" cargo build --target=i686-pc-windows-msvc --release</Command>
@@ -242,7 +242,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)\..\..\..\..\target\i686-pc-windows-msvc\release</AdditionalLibraryDirectories>
-      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib;ntdll.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if not exist "$(SolutionDir)\..\..\..\..\target\i686-pc-windows-msvc\release\mla.lib" cargo build --target=i686-pc-windows-msvc --release</Command>
@@ -305,7 +305,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)\..\..\..\..\target\x86_64-pc-windows-msvc\release</AdditionalLibraryDirectories>
-      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib;ntdll.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if not exist "$(SolutionDir)\..\..\..\..\target\x86_64-pc-windows-msvc\release\mla.lib" cargo build --target=x86_64-pc-windows-msvc --release</Command>
@@ -328,7 +328,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)\..\..\..\..\target\x86_64-pc-windows-msvc\release</AdditionalLibraryDirectories>
-      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);Bcrypt.lib;ntdll.lib</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if not exist "$(SolutionDir)\..\..\..\..\target\x86_64-pc-windows-msvc\release\mla.lib" cargo build --target=x86_64-pc-windows-msvc --release</Command>
