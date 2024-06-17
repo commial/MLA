@@ -50,9 +50,6 @@ jobs:
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
-        # Avoid a regression of Cargo, breaking at link time
-        toolchain: 1.79
-        default: true
         target: ${{ matrix.target }}
     - name: "Display necessary libs"
       working-directory: bindings/C
