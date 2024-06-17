@@ -55,6 +55,7 @@ jobs:
         default: true
         target: ${{ matrix.target }}
     - name: "Display necessary libs"
+      working-directory: bindings/C
       run: cargo rustc -- --print=native-static-libs
     - uses: microsoft/setup-msbuild@v1.0.2
     - name: Compile C/CPP bindings test program for Windows
