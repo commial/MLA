@@ -1,27 +1,29 @@
-use crate::ArchiveFileID;
-use hkdf::InvalidLength;
+//! Error structs
+use crate::ArchiveEntryId;
+use crate::entry::EntryName;
 use std::error;
 use std::fmt;
 use std::io;
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// IO Error (not enough data, etc.)
     IOError(io::Error),
-    /// Wrong magic, must be "MLA"
+    /// Wrong magic, must be "MLAFAAA"
     WrongMagic,
-    /// Unsupported version, must be 1
+    /// Unsupported version, must be 2
     UnsupportedVersion,
-    /// Supplied ECC key is not in the expected format
-    InvalidECCKeyFormat,
-    /// Wrong BlockSubFile magic has been encountered. Is the deserializion
+    /// Supplied key is not in the expected format
+    InvalidKeyFormat,
+    /// Wrong `BlockSubFile` magic has been encountered. Is the deserializion
     /// starting at the beginning of a block?
     WrongBlockSubFileType,
     /// An error has occurred while converting into UTF8. This error could
-    /// happens while parsing the block filename
+    /// happens while parsing the entry data name
     UTF8ConversionError(std::string::FromUtf8Error),
-    /// Filenames have a limited size `FILENAME_MAX_SIZE`
-    FilenameTooLong,
+    /// `EntryNames` have a limited size `ENTRY_NAME_MAX_SIZE`
+    EntryNameTooLong,
     /// The writer state is not in the expected state for the current operation
     WrongArchiveWriterState {
         current_state: String,
@@ -34,7 +36,7 @@ pub enum Error {
     /// The writer state is not in the expected state for the current operation
     WrongWriterState(String),
     /// Error with the inner random generator
-    RandError(rand::Error),
+    RandError,
     /// A Private Key is required to decrypt the encrypted cipher key
     PrivateKeyNeeded,
     /// Deserialization error. May happens when starting from a wrong offset /
@@ -43,7 +45,7 @@ pub enum Error {
     /// Serialization error. May happens on I/O errors
     SerializationError,
     /// Missing metadata (usually means the footer has not been correctly read,
-    /// a repair might be needed)
+    /// a `clean-truncated` operation might be needed)
     MissingMetadata,
     /// Error returned on API call with incorrect argument
     BadAPIArgument(String),
@@ -51,12 +53,32 @@ pub enum Error {
     EndOfStream,
     /// An error happens in the configuration
     ConfigError(ConfigError),
-    /// Filename already used
-    DuplicateFilename,
+    /// `EntryName` already used
+    DuplicateEntryName,
     /// Wrong tag while decrypting authenticated data
     AuthenticatedDecryptionWrongTag,
     /// Unable to expand while using the HKDF
     HKDFInvalidKeyLength,
+    /// Error during HPKE computation
+    HPKEError,
+    /// Invalid last tag
+    InvalidLastTag,
+    /// User asked for encryption but archive was not marked as encrypted
+    EncryptionAskedButNotMarkedPresent,
+    /// MLA archive must be terminated by EMLAAAAA
+    WrongEndMagic,
+    // Cannot validate any signature
+    NoValidSignatureFound,
+    // Signature verification was asked but no signature layer was found
+    SignatureVerificationAskedButNoSignatureLayerFound,
+    // MissingEndOfEncryptedInnerLayerMagic
+    MissingEndOfEncryptedInnerLayerMagic,
+    // TruncatedTag
+    TruncatedTag,
+    // UnknownTagPosition
+    UnknownTagPosition,
+    // Arbitrary String error
+    Other(String),
 }
 
 impl fmt::Display for Error {
@@ -78,21 +100,9 @@ impl From<std::string::FromUtf8Error> for Error {
     }
 }
 
-impl From<rand::Error> for Error {
-    fn from(error: rand::Error) -> Self {
-        Error::RandError(error)
-    }
-}
-
-impl From<bincode::ErrorKind> for Error {
-    fn from(_error: bincode::ErrorKind) -> Self {
-        Error::DeserializationError
-    }
-}
-
 impl From<Error> for io::Error {
     fn from(error: Error) -> Self {
-        io::Error::new(io::ErrorKind::Other, format!("{error}"))
+        io::Error::other(format!("{error}"))
     }
 }
 
@@ -105,26 +115,20 @@ impl From<ConfigError> for Error {
     }
 }
 
-impl From<InvalidLength> for Error {
-    fn from(_error: InvalidLength) -> Self {
-        Error::HKDFInvalidKeyLength
-    }
-}
-
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match &self {
             Error::IOError(err) => Some(err),
             Error::UTF8ConversionError(err) => Some(err),
-            Error::RandError(err) => Some(err),
             Error::ConfigError(err) => Some(err),
             _ => None,
         }
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug)]
-pub enum FailSafeReadError {
+pub enum TruncatedReadError {
     /// Everything ends correctly
     NoError,
     /// An unexpected EOF occurs while getting the next block
@@ -136,25 +140,25 @@ pub enum FailSafeReadError {
     /// An error occurs in the middle of a file
     ErrorInFile(io::Error, String),
     /// A file ID is being reused
-    ArchiveFileIDReuse(ArchiveFileID),
-    /// A filename is being reused
-    FilenameReuse(String),
+    ArchiveEntryIDReuse(ArchiveEntryId),
+    /// An entry name is being reused
+    EntryNameReuse(String),
     /// Data for a file already closed
-    ArchiveFileIDAlreadyClose(ArchiveFileID),
+    ArchiveEntryIDAlreadyClosed(ArchiveEntryId),
     /// Content for an unknown file
-    ContentForUnknownFile(ArchiveFileID),
+    ContentForUnknownFile(ArchiveEntryId),
     /// Termination of an unknwown file
-    EOFForUnknownFile(ArchiveFileID),
+    EOFForUnknownFile(ArchiveEntryId),
     /// Wraps an already existing error and indicates which files are not
     /// finished (a file can be finished but uncompleted)
-    UnfinishedFiles {
-        filenames: Vec<String>,
-        stopping_error: Box<FailSafeReadError>,
+    UnfinishedEntries {
+        names: Vec<EntryName>,
+        stopping_error: Box<TruncatedReadError>,
     },
     /// End of original archive reached - this is the best case
     EndOfOriginalArchiveData,
-    /// Error in the FailSafeReader internal state
-    FailSafeReadInternalError,
+    /// Error in the `TruncatedReader` internal state
+    TruncatedReadInternalError,
     /// The file's hash does not correspond to the expected one
     HashDiffers {
         expected: Vec<u8>,
@@ -162,34 +166,44 @@ pub enum FailSafeReadError {
     },
 }
 
-impl fmt::Display for FailSafeReadError {
+impl fmt::Display for TruncatedReadError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // For now, use the debug derived version
         write!(f, "{self:?}")
     }
 }
 
-impl error::Error for FailSafeReadError {
+impl error::Error for TruncatedReadError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match &self {
-            FailSafeReadError::IOErrorOnNextBlock(err) => Some(err),
-            FailSafeReadError::ErrorOnNextBlock(err) => Some(err),
-            FailSafeReadError::ErrorInFile(err, _path) => Some(err),
+            TruncatedReadError::IOErrorOnNextBlock(err) => Some(err),
+            TruncatedReadError::ErrorOnNextBlock(err) => Some(err),
+            TruncatedReadError::ErrorInFile(err, _path) => Some(err),
             _ => None,
         }
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ConfigError {
     IncoherentPersistentConfig,
     // Compression specifics
     CompressionLevelOutOfRange,
     // Encryption specifics
+    /// No recipients provided, encryption can't continue
+    NoRecipients,
+    /// Internal state has not yet been created. A call to `to_persistent` might be missing
     EncryptionKeyIsMissing,
     PrivateKeyNotSet,
     PrivateKeyNotFound,
-    ECIESComputationError,
+    MLKEMComputationError,
+    DHKEMComputationError,
+    KeyCommitmentComputationError,
+    /// The encrypted key commitment does not correspond to the key commitment chain
+    KeyCommitmentCheckingError,
+    /// Error while wrapping or unwrapping the encryption key
+    KeyWrappingComputationError,
 }
 
 impl fmt::Display for ConfigError {

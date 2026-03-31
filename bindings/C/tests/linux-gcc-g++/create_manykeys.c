@@ -4,13 +4,10 @@
 #include <string.h>
 #include "mla.h"
 
-// From samples/test_ed25519.pem and samples/test_x25519.pem
-const char *szPubkey = "-----BEGIN PUBLIC KEY-----\n"
-   "MCowBQYDK2VwAyEA9md4yIIFx+ftwe0c1p2YsJFrobXWKxan54Bs+/jFagE=\n"
-   "-----END PUBLIC KEY-----\n"
-   "-----BEGIN PUBLIC KEY-----\n"
-   "MCowBQYDK2VuAyEA/6CISoJRU5cqURCDRXpPUUF4nHGNo8jzQm+KUKhmc1c=\n"
-   "-----END PUBLIC KEY-----\n";
+// Public key from samples/test_mlakey.mlapub (replaced in Makefile via sed)
+const char *szPubkey = "REPLACE WITH PUBLIC KEY FROM SAMPLE";
+// Public key from samples/test_mlakey_2.mlapub (replaced in Makefile via sed)
+const char *szPubkey2 = "REPLACE WITH PUBLIC KEY 2 FROM SAMPLE";
 
 static int32_t callback_write(const uint8_t* pBuffer, uint32_t length, void *context, uint32_t *pBytesWritten)
 {
@@ -42,15 +39,10 @@ int main()
    }
 
    MLAStatus status = 0;
-   MLAConfigHandle hConfig = NULL;
-   status = mla_config_default_new(&hConfig);
-   if (status != MLA_STATUS_SUCCESS)
-   {
-      fprintf(stderr, " [!] Config creation failed with code %" PRIX64 "\n", (uint64_t)status);
-      return (int)status;
-   }
+   MLAWriterConfigHandle hConfig = NULL;
 
-   status = mla_config_add_public_keys(hConfig, szPubkey);
+   const char *const keys[] = {szPubkey, szPubkey2};
+   status = create_mla_writer_config_with_encryption_without_signature(&hConfig, keys, 2);
    if (status != MLA_STATUS_SUCCESS)
    {
       fprintf(stderr, " [!] Public key set failed with code %" PRIX64 "\n", (uint64_t)status);
@@ -65,8 +57,8 @@ int main()
       return (int)status;
    }
 
-   MLAArchiveFileHandle hFile = NULL;
-   status = mla_archive_file_new(hArchive, "test.txt", &hFile);
+   MLAArchiveEntryHandle hFile = NULL;
+   status = mla_archive_start_entry_with_path_as_name(hArchive, "test.txt", &hFile);
    if (status != MLA_STATUS_SUCCESS)
    {
       fprintf(stderr, " [!] File creation failed with code %" PRIX64 "\n", (uint64_t)status);

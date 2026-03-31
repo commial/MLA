@@ -3,3 +3,10 @@
 debug/
 debugs/
 target/
+
+# pycache for py-bindings
+__pycache__/
+
+# mdbook
+index.html
+doc/book/

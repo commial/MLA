@@ -1,150 +1,305 @@
+//! `ArchiveReader` and `ArchiveWriter` configuration
+use crate::crypto::hybrid::{MLADecryptionPrivateKey, MLAEncryptionPublicKey};
+use crate::crypto::mlakey::{MLASignatureVerificationPublicKey, MLASigningPrivateKey};
 use crate::errors::ConfigError;
+use crate::helpers::shared_secret::MLADecryptionSharedSecret;
 use crate::layers::compress::CompressionConfig;
-use crate::layers::encrypt::{
-    EncryptionConfig, EncryptionPersistentConfig, EncryptionReaderConfig,
-};
-use crate::Layers;
-use serde::{Deserialize, Serialize};
+use crate::layers::encrypt::{EncryptionConfig, EncryptionReaderConfig};
+use crate::layers::signature::{SignatureConfig, SignatureReaderConfig};
 
-/// This module implements the configuration capabilities of MLA Archive
+pub use crate::layers::compress::DEFAULT_COMPRESSION_LEVEL;
 
-/// User's configuration used to prepare an archive
+/// Configuration to write an archive.
 pub struct ArchiveWriterConfig {
-    layers_enabled: Layers,
-
-    // Layers specifics
-    pub(crate) compress: CompressionConfig,
-    pub(crate) encrypt: EncryptionConfig,
+    pub(crate) compression: Option<CompressionConfig>,
+    pub(crate) encryption: Option<EncryptionConfig>,
+    pub(crate) signature: Option<SignatureConfig>,
 }
-
-/// Internal configuration stored in the header, to be reloaded
-#[derive(Serialize, Deserialize)]
-pub struct ArchivePersistentConfig {
-    pub layers_enabled: Layers,
-
-    // Layers specifics
-    pub encrypt: Option<EncryptionPersistentConfig>,
-}
-
-pub type ConfigResult<'a> = Result<&'a mut ArchiveWriterConfig, ConfigError>;
 
 impl ArchiveWriterConfig {
-    /// Start a builder without any layers configured
-    pub fn new() -> ArchiveWriterConfig {
-        ArchiveWriterConfig {
-            layers_enabled: Layers::EMPTY,
-            compress: CompressionConfig::default(),
-            encrypt: EncryptionConfig::default(),
-        }
-    }
-
-    /// Enable a layer
-    pub fn enable_layer(&mut self, layer: Layers) -> &mut ArchiveWriterConfig {
-        self.layers_enabled |= layer;
-        self
-    }
-
-    /// Disable a layer
-    pub fn disable_layer(&mut self, layer: Layers) -> &mut ArchiveWriterConfig {
-        self.layers_enabled &= !layer;
-        self
-    }
-
-    /// Set several layers at once
-    pub fn set_layers(&mut self, layers: Layers) -> &mut ArchiveWriterConfig {
-        self.layers_enabled = layers;
-        self
-    }
-
-    /// Get the persistent version, to be stored in the header
-    pub fn to_persistent(&self) -> Result<ArchivePersistentConfig, ConfigError> {
-        Ok(ArchivePersistentConfig {
-            layers_enabled: self.layers_enabled,
-            encrypt: {
-                if self.is_layers_enabled(Layers::ENCRYPT) {
-                    Some(self.encrypt.to_persistent()?)
-                } else {
-                    None
-                }
-            },
+    /// Will encrypt content with given encryption public keys and sign content
+    /// with given signature private keys.
+    ///
+    /// Do not mix up keys. If `A` sends an archive to `B`,
+    /// `encryption_public_keys` must contain
+    /// `B`'s encryption public key and
+    /// `signing_private_keys` must contain `A`'s signature private key.
+    ///
+    /// Will compress by default with `DEFAULT_COMPRESSION_LEVEL`. Can be
+    /// configured with `with_compression_level` and `without_compression`.
+    ///
+    /// Returns `ConfigError::EncryptionKeyIsMissing` if `encryption_public_keys` is empty.
+    /// Returns `ConfigError::PrivateKeyNotSet` if `signing_private_keys` is empty.
+    pub fn with_encryption_with_signature(
+        encryption_public_keys: &[MLAEncryptionPublicKey],
+        signing_private_keys: &[MLASigningPrivateKey],
+    ) -> Result<Self, ConfigError> {
+        Ok(ArchiveWriterConfig {
+            compression: Some(CompressionConfig::default()),
+            encryption: Some(EncryptionConfig::new(encryption_public_keys)?),
+            signature: Some(SignatureConfig::new(signing_private_keys)?),
         })
     }
 
-    /// Check if layers are enabled
-    pub fn is_layers_enabled(&self, layer: Layers) -> bool {
-        self.layers_enabled.contains(layer)
+    /// WARNING: Will NOT sign content !
+    ///
+    /// Will encrypt content with given encryption public keys AND WONT SIGN CONTENT.
+    ///
+    /// Do not mix up keys. If `A` sends an archive to `B`,
+    /// `encryption_public_keys` must contain
+    /// `B`'s encryption public key.
+    ///
+    /// Will compress by default with `DEFAULT_COMPRESSION_LEVEL`. Can be
+    /// configured with `with_compression_level` and `without_compression`.
+    ///
+    /// Returns `ConfigError::EncryptionKeyIsMissing` if `encryption_public_keys` is empty.
+    pub fn with_encryption_without_signature(
+        encryption_public_keys: &[MLAEncryptionPublicKey],
+    ) -> Result<Self, ConfigError> {
+        Ok(ArchiveWriterConfig {
+            compression: Some(CompressionConfig::default()),
+            encryption: Some(EncryptionConfig::new(encryption_public_keys)?),
+            signature: None,
+        })
     }
 
-    /// Consistency check
-    pub fn check(&self) -> Result<(), ConfigError> {
-        if self.is_layers_enabled(Layers::ENCRYPT) {
-            self.encrypt.check()?;
-        }
-        Ok(())
+    /// WARNING: Will NOT encrypt content !
+    ///
+    /// Will sign content with given signature private keys AND WONT ENCRYPT content.
+    ///
+    /// Do not mix up keys. If `A` sends an archive to `B`,
+    /// `signing_private_keys` must contain `A`'s signature private key.
+    ///
+    /// Will compress by default with `DEFAULT_COMPRESSION_LEVEL`. Can be
+    /// configured with `with_compression_level` and `without_compression`.
+    ///
+    /// Returns `ConfigError::PrivateKeyNotSet` if `signing_private_keys` is empty.
+    pub fn without_encryption_with_signature(
+        signing_private_keys: &[MLASigningPrivateKey],
+    ) -> Result<Self, ConfigError> {
+        Ok(ArchiveWriterConfig {
+            compression: Some(CompressionConfig::default()),
+            encryption: None,
+            signature: Some(SignatureConfig::new(signing_private_keys)?),
+        })
+    }
+
+    /// WARNING: Will NOT encrypt content and Will NOT sign content !
+    ///
+    /// Will compress by default with `DEFAULT_COMPRESSION_LEVEL`. Can be
+    /// configured with `with_compression_level` and `without_compression`.
+    pub fn without_encryption_without_signature() -> Result<Self, ConfigError> {
+        Ok(ArchiveWriterConfig {
+            compression: Some(CompressionConfig::default()),
+            encryption: None,
+            signature: None,
+        })
+    }
+
+    /// Set the compression level (0-11); bigger values cause denser, but slower compression
+    pub fn with_compression_level(self, compression_level: u32) -> Result<Self, ConfigError> {
+        let ArchiveWriterConfig {
+            compression,
+            encryption,
+            signature,
+        } = self;
+        let mut compression_config = compression.unwrap_or_default();
+        compression_config.set_compression_level(compression_level)?;
+        Ok(ArchiveWriterConfig {
+            compression: Some(compression_config),
+            encryption,
+            signature,
+        })
+    }
+
+    /// Disable compression
+    #[must_use]
+    pub fn without_compression(mut self) -> ArchiveWriterConfig {
+        self.compression = None;
+        self
     }
 }
 
-impl std::default::Default for ArchiveWriterConfig {
-    /// The default version is missing some parameters to work properly; this is intended
-    /// Missing parameters:
-    /// - ecc_encryption_key
-    fn default() -> Self {
-        ArchiveWriterConfig {
-            layers_enabled: Layers::default(),
-            compress: CompressionConfig::default(),
-            encrypt: EncryptionConfig::default(),
-        }
-    }
-}
-
-/// User's configuration used to read an archive
-#[derive(Default)]
+/// Configuration used to read an archive.
+///
+/// Use this to build an `IncompleteArchiveReaderConfig` which you will be able
+/// to use to build an `ArchiveReaderConfig`.
 pub struct ArchiveReaderConfig {
-    pub layers_enabled: Layers,
-
+    pub(crate) accept_unencrypted: bool,
     // Layers specifics
-    pub encrypt: EncryptionReaderConfig,
+    pub(crate) encrypt: EncryptionReaderConfig,
+    pub(crate) signature_reader_config: SignatureReaderConfig,
 }
 
 impl ArchiveReaderConfig {
-    /// Start a builder, without any specific option
-    pub fn new() -> Self {
-        Self {
-            layers_enabled: Layers::EMPTY,
-            encrypt: EncryptionReaderConfig::default(),
+    /// Will refuse to open an archive without signature verified by AT LEAST
+    /// one of the given `signature_verification_public_keys`.
+    ///
+    /// Caller will be able to tell how many and against which keys signatures
+    /// were correctly verified by reading `ArchiveReader::from_config` return value.
+    pub fn with_signature_verification(
+        signature_verification_public_keys: &[MLASignatureVerificationPublicKey],
+    ) -> IncompleteArchiveReaderConfig {
+        let mut signature_reader_config = SignatureReaderConfig::default();
+        signature_reader_config.set_public_keys(signature_verification_public_keys);
+        IncompleteArchiveReaderConfig {
+            shared_secrets: Vec::new(),
+            signature_reader_config,
         }
     }
 
-    pub fn load_persistent(
-        &mut self,
-        config: ArchivePersistentConfig,
-    ) -> Result<&mut ArchiveReaderConfig, ConfigError> {
-        self.layers_enabled = config.layers_enabled;
-        if self.layers_enabled.contains(Layers::ENCRYPT) {
-            match config.encrypt {
-                Some(to_load) => {
-                    self.encrypt.load_persistent(to_load)?;
-                }
-                None => {
-                    return Err(ConfigError::IncoherentPersistentConfig);
-                }
-            }
+    /// WARNING: Will NOT verify archive signature.
+    ///
+    /// This skips signature verification whether the archive is signed or not.
+    ///
+    /// This enables reading unsigned archives and reading signed archives without the cost of verification.
+    pub fn without_signature_verification() -> IncompleteArchiveReaderConfig {
+        let mut signature_reader_config = SignatureReaderConfig::default();
+        signature_reader_config.signature_check = false;
+        IncompleteArchiveReaderConfig {
+            shared_secrets: Vec::new(),
+            signature_reader_config,
         }
-        Ok(self)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Struct returned by one of the `ArchiveReaderConfig` associated functions.
+///
+/// `IncompleteArchiveReaderConfig` associated functions return an
+/// `ArchiveReaderConfig`. Thus you should first call an associated function
+/// of `ArchiveReaderConfig` and call an associated function of
+/// `IncompleteArchiveReaderConfig` on the result to obtain a valid
+/// `ArchiveReaderConfig`.
+///
+/// This ensures we configure both signature and encryption in a flexible
+/// way before being able to operate on an archive.
+#[must_use]
+pub struct IncompleteArchiveReaderConfig {
+    shared_secrets: Vec<MLADecryptionSharedSecret>,
+    signature_reader_config: SignatureReaderConfig,
+}
 
-    #[test]
-    fn archive_building() {
-        let mut builder = ArchiveWriterConfig::new();
-        builder
-            .enable_layer(Layers::ENCRYPT)
-            .enable_layer(Layers::COMPRESS)
-            .disable_layer(Layers::ENCRYPT);
-        assert_eq!(builder.layers_enabled, Layers::COMPRESS);
+impl IncompleteArchiveReaderConfig {
+    /// Will refuse to open an archive without encryption.
+    ///
+    /// Will try to decrypt with each of provided ones until a working one is found.
+    pub fn with_encryption(
+        self,
+        decryption_private_keys: &[MLADecryptionPrivateKey],
+    ) -> ArchiveReaderConfig {
+        let mut encrypt = EncryptionReaderConfig::default();
+        encrypt.set_private_keys(decryption_private_keys);
+        if !self.shared_secrets.is_empty() {
+            encrypt.set_shared_secrets(self.shared_secrets);
+        }
+        ArchiveReaderConfig {
+            accept_unencrypted: false,
+            encrypt,
+            signature_reader_config: self.signature_reader_config,
+        }
+    }
+
+    /// WARNING: This will accept reading unencrypted archives !
+    ///
+    /// If you do not know if an archive is encrypted or not and want to read even if it is NOT, you may use this function.
+    /// This avoids having to open the archive a second time after decryption failure, for example to save the cost of doing signature check twice.
+    pub fn with_encryption_accept_unencrypted(
+        self,
+        decryption_private_keys: &[MLADecryptionPrivateKey],
+    ) -> ArchiveReaderConfig {
+        let mut encrypt = EncryptionReaderConfig::default();
+        encrypt.set_private_keys(decryption_private_keys);
+        if !self.shared_secrets.is_empty() {
+            encrypt.set_shared_secrets(self.shared_secrets);
+        }
+        ArchiveReaderConfig {
+            accept_unencrypted: true,
+            encrypt,
+            signature_reader_config: self.signature_reader_config,
+        }
+    }
+
+    /// Will NOT accept encrypted archives.
+    pub fn without_encryption(self) -> ArchiveReaderConfig {
+        let encrypt = EncryptionReaderConfig::default();
+        ArchiveReaderConfig {
+            accept_unencrypted: true,
+            encrypt,
+            signature_reader_config: self.signature_reader_config,
+        }
+    }
+
+    /// This is only for advanced use cases. Use this if you want to use `mla::helpers::shared_secret` functionality.
+    ///
+    /// Adds shared secrets to try to decrypt with.
+    pub fn add_decryption_shared_secrets(
+        self,
+        shared_secrets: &[MLADecryptionSharedSecret],
+    ) -> Self {
+        Self {
+            shared_secrets: shared_secrets.to_vec(),
+            signature_reader_config: self.signature_reader_config,
+        }
+    }
+}
+
+/// `TruncatedReader` decryption mode
+#[non_exhaustive]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum TruncatedReaderDecryptionMode {
+    /// Returns only the data that have been authenticated (in AEAD meaning, there will be NO signature verification) on decryption
+    #[default]
+    OnlyAuthenticatedData,
+    /// Returns all data, even if not authenticated. In the case where the last content chunk has its aes-gcm tag truncated, this may handle the tag interpreted as encrypted data, thus producing up to 15 bytes of garbage in output.
+    DataEvenUnauthenticated,
+}
+
+pub struct TruncatedReaderConfig {
+    pub(crate) accept_unencrypted: bool,
+    // Layers specifics
+    pub(crate) encrypt: EncryptionReaderConfig,
+    pub(crate) truncated_decryption_mode: TruncatedReaderDecryptionMode,
+}
+
+impl TruncatedReaderConfig {
+    /// Will refuse to open an archive without encryption.
+    pub fn without_signature_verification_with_encryption(
+        decryption_private_keys: &[MLADecryptionPrivateKey],
+        truncated_mode: TruncatedReaderDecryptionMode,
+    ) -> TruncatedReaderConfig {
+        let mut encrypt = EncryptionReaderConfig::default();
+        encrypt.set_private_keys(decryption_private_keys);
+        TruncatedReaderConfig {
+            accept_unencrypted: false,
+            encrypt,
+            truncated_decryption_mode: truncated_mode,
+        }
+    }
+
+    /// WARNING: This will accept reading unencrypted archives !
+    ///
+    /// If you do not know if an archive is encrypted or not and want to read even if it is NOT, you may use this function.
+    /// This avoids having to open the archive a second time after decryption failure, for example to save the cost of doing signature check twice.
+    pub fn without_signature_verification_with_encryption_accept_unencrypted(
+        decryption_private_keys: &[MLADecryptionPrivateKey],
+        truncated_mode: TruncatedReaderDecryptionMode,
+    ) -> TruncatedReaderConfig {
+        let mut encrypt = EncryptionReaderConfig::default();
+        encrypt.set_private_keys(decryption_private_keys);
+        TruncatedReaderConfig {
+            accept_unencrypted: false,
+            encrypt,
+            truncated_decryption_mode: truncated_mode,
+        }
+    }
+
+    /// Will NOT accept encrypted archives.
+    pub fn without_signature_verification_without_encryption() -> TruncatedReaderConfig {
+        let encrypt = EncryptionReaderConfig::default();
+        TruncatedReaderConfig {
+            accept_unencrypted: true,
+            encrypt,
+            truncated_decryption_mode: TruncatedReaderDecryptionMode::default(),
+        }
     }
 }

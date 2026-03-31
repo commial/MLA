@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <errno.h>
 #ifdef __cplusplus
 #include "mla.hpp"
 #define MLA_STATUS(x) MLAStatus::x
@@ -9,11 +10,7 @@
 #define MLA_STATUS(x) (x)
 #endif
 
-// From samples/test_ed25519_pub.pem
-PCSTR szPubkey = "-----BEGIN PUBLIC KEY-----\n"
-"MCowBQYDK2VwAyEA9md4yIIFx+ftwe0c1p2YsJFrobXWKxan54Bs+/jFagE=\n"
-"-----END PUBLIC KEY-----\n";
-
+// Callback for writing data to a file (Windows HANDLE-based)
 static int32_t callback_write(const uint8_t* pBuffer, uint32_t length, void* context, uint32_t* pBytesWritten)
 {
     HANDLE hOutFile = (HANDLE)context;
@@ -27,6 +24,7 @@ static int32_t callback_write(const uint8_t* pBuffer, uint32_t length, void* con
     return 0;
 }
 
+// Callback for flushing file buffers to disk
 static int32_t callback_flush(void* context)
 {
     HANDLE hOutFile = (HANDLE)context;
@@ -39,70 +37,133 @@ static int32_t callback_flush(void* context)
     return 0;
 }
 
+// Test function to create an MLA archive and write a simple file into it
 int test_writer()
 {
-    HANDLE hOutFile = INVALID_HANDLE_VALUE;
+    FILE *kf = NULL;
+    char *keyData = NULL;
+    const char *keys[1] = { NULL };
 
+    HANDLE hOutFile = INVALID_HANDLE_VALUE;
+    MLAStatus status = MLA_STATUS(MLA_STATUS_SUCCESS);
+    MLAWriterConfigHandle hConfig = NULL;
+    MLAArchiveHandle hArchive = NULL;
+    MLAArchiveEntryHandle hFile = NULL;
+    long keySize = 0;
+    size_t readLen = 0;
+    const char *message = NULL;
+
+    // Open public key file for encryption
+    if (fopen_s(&kf, "../../../../samples/test_mlakey.mlapub", "rb") != 0)
+    {
+        fprintf(stderr, " [!] Could not open public key file\n");
+        status = (MLAStatus)errno;
+        goto cleanup;
+    }
+
+    // Determine the size
+    if (fseek(kf, 0, SEEK_END) != 0)
+    {
+        fprintf(stderr, " [!] Could not seek in public key file\n");
+        status = (MLAStatus)errno;
+        goto cleanup;
+    }
+
+    keySize = ftell(kf);
+    if (keySize <= 0)
+    {
+        fprintf(stderr, " [!] Invalid key file size\n");
+        status = (MLAStatus)1;
+        goto cleanup;
+    }
+
+    // Allocate buffer for key (with null terminator)
+    keyData = (char *)malloc((size_t)keySize + 1);
+    if (!keyData)
+    {
+        fprintf(stderr, " [!] Memory allocation failed\n");
+        status = (MLAStatus)ENOMEM;
+        goto cleanup;
+    }
+
+    rewind(kf);
+
+    // Read the public key file into memory
+    readLen = fread(keyData, 1, keySize, kf);
+    if (readLen != (size_t)keySize)
+    {
+        fprintf(stderr, " [!] Could not read public key file\n");
+        status = (MLAStatus)errno;
+        goto cleanup;
+    }
+
+    // Create or overwrite the output .mla archive file
     hOutFile = CreateFileA("test.mla", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     if (hOutFile == INVALID_HANDLE_VALUE)
     {
         fprintf(stderr, " [!] Could not create output file: error %lu\n", GetLastError());
-        return 1;
+        status = (MLAStatus)1;
+        goto cleanup;
     }
 
-    MLAStatus status;
-    MLAConfigHandle hConfig = NULL;
-    status = mla_config_default_new(&hConfig);
-    if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
-    {
-        fprintf(stderr, " [!] Config creation failed with code %" PRIX64 "\n", (uint64_t)status);
-        return (int)status;
-    }
+    keyData[readLen] = '\0';  // Null terminate
 
-    status = mla_config_add_public_keys(hConfig, szPubkey);
+    // Create writer config with encryption (no signature)
+    keys[0] = keyData;
+    status = create_mla_writer_config_with_encryption_without_signature(&hConfig, keys, 1);
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] Public key set failed with code %" PRIX64 "\n", (uint64_t)status);
-        return (int)status;
+        goto cleanup;
     }
 
-    MLAArchiveHandle hArchive = NULL;
+    // Initialize new archive using the provided config and write/flush callbacks
     status = mla_archive_new(&hConfig, &callback_write, &callback_flush, (void*)hOutFile, &hArchive);
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] Archive creation failed with code %" PRIX64 "\n", (uint64_t)status);
-        return (int)status;
+        goto cleanup;
     }
 
-    MLAArchiveFileHandle hFile = NULL;
-    status = mla_archive_file_new(hArchive, "test.txt", &hFile);
+    // Start a new file entry in the archive named "test.txt"
+    status = mla_archive_start_entry_with_path_as_name(hArchive, "test.txt", &hFile);
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] File creation failed with code %" PRIX64 "\n", (uint64_t)status);
-        return 1;
+        goto cleanup;
     }
 
-    status = mla_archive_file_append(hArchive, hFile, (const uint8_t*)"Hello, World!\n", (uint32_t)strlen("Hello, World!\n"));
+    // Write message contents into the archive
+    message = "Hello, World!\n";
+    status = mla_archive_file_append(hArchive, hFile, (const uint8_t*)message, (uint32_t)strlen(message));
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] File write failed with code %" PRIX64 "\n", (uint64_t)status);
-        return 1;
+        goto cleanup;
     }
 
+    // Finalize the file inside the archive
     status = mla_archive_file_close(hArchive, &hFile);
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] File close failed with code %" PRIX64 "\n", (uint64_t)status);
-        return 1;
+        goto cleanup;
     }
 
+    // Finalize and close the archive
     status = mla_archive_close(&hArchive);
     if (status != MLA_STATUS(MLA_STATUS_SUCCESS))
     {
         fprintf(stderr, " [!] Archive close failed with code %" PRIX64 "\n", (uint64_t)status);
-        return 1;
+        goto cleanup;
     }
 
-    CloseHandle(hOutFile);
-    return 0;
+    printf("SUCCESS: test_writer\n");
+
+cleanup:
+    // Cleanup all resources
+    if (keyData) free(keyData);
+    if (kf) fclose(kf);
+    if (hOutFile != INVALID_HANDLE_VALUE) CloseHandle(hOutFile);
+    return (int)status;
 }

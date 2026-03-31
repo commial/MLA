@@ -1,10 +1,8 @@
-use std::io;
+use std::io::{self, ErrorKind};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::layers::traits::{
-    InnerWriterTrait, InnerWriterType, LayerFailSafeReader, LayerReader, LayerWriter,
-};
 use crate::Error;
+use crate::layers::traits::{InnerWriterTrait, LayerReader, LayerTruncatedReader, LayerWriter};
 
 use super::traits::InnerReaderTrait;
 
@@ -21,18 +19,10 @@ impl<W: InnerWriterTrait> RawLayerWriter<W> {
     }
 }
 
-impl<'a, W: InnerWriterTrait> LayerWriter<'a, W> for RawLayerWriter<W> {
-    fn into_inner(self) -> Option<InnerWriterType<'a, W>> {
-        None
-    }
-
-    fn into_raw(self: Box<Self>) -> W {
-        self.inner
-    }
-
-    fn finalize(&mut self) -> Result<(), Error> {
+impl<W: InnerWriterTrait> LayerWriter<'_, W> for RawLayerWriter<W> {
+    fn finalize(self: Box<Self>) -> Result<W, Error> {
         // No recursive call, this is the last layer
-        Ok(())
+        Ok(self.inner)
     }
 }
 
@@ -72,11 +62,7 @@ impl<R: InnerReaderTrait> RawLayerReader<R> {
     }
 }
 
-impl<'a, R: InnerReaderTrait> LayerReader<'a, R> for RawLayerReader<R> {
-    fn into_inner(self) -> Option<Box<dyn 'a + LayerReader<'a, R>>> {
-        None
-    }
-
+impl<R: InnerReaderTrait> LayerReader<'_, R> for RawLayerReader<R> {
     fn into_raw(self: Box<Self>) -> R {
         self.inner
     }
@@ -90,9 +76,12 @@ impl<'a, R: InnerReaderTrait> LayerReader<'a, R> for RawLayerReader<R> {
 impl<R: InnerReaderTrait> Seek for RawLayerReader<R> {
     /// Offer a position relatively to `self.offset_pos`
     fn seek(&mut self, ask_pos: SeekFrom) -> io::Result<u64> {
+        let e = || io::Error::from(ErrorKind::InvalidInput);
         match ask_pos {
             SeekFrom::Start(pos) => {
-                self.inner.seek(SeekFrom::Start(self.offset_pos + pos))?;
+                self.inner.seek(SeekFrom::Start(
+                    self.offset_pos.checked_add(pos).ok_or_else(e)?,
+                ))?;
                 Ok(pos)
             }
             SeekFrom::Current(_pos) => {
@@ -101,7 +90,7 @@ impl<R: InnerReaderTrait> Seek for RawLayerReader<R> {
                     self.inner.seek(SeekFrom::Start(self.offset_pos))?;
                     Ok(0)
                 } else {
-                    Ok(inner_pos - self.offset_pos)
+                    Ok(inner_pos.checked_sub(self.offset_pos).ok_or_else(e)?)
                 }
             }
             SeekFrom::End(_pos) => {
@@ -110,7 +99,7 @@ impl<R: InnerReaderTrait> Seek for RawLayerReader<R> {
                     self.inner.seek(SeekFrom::Start(self.offset_pos))?;
                     Ok(0)
                 } else {
-                    Ok(inner_pos - self.offset_pos)
+                    Ok(inner_pos.checked_sub(self.offset_pos).ok_or_else(e)?)
                 }
             }
         }
@@ -124,35 +113,27 @@ impl<R: InnerReaderTrait> Read for RawLayerReader<R> {
     }
 }
 
-// ---------- FailSafeReader ----------
+// ---------- TruncatedReader ----------
 
 /// Dummy layer, standing for the last layer (wrapping I/O)
-pub struct RawLayerFailSafeReader<R: Read> {
+pub struct RawLayerTruncatedReader<R: Read> {
     inner: R,
 }
 
-impl<R: Read> RawLayerFailSafeReader<R> {
+impl<R: Read> RawLayerTruncatedReader<R> {
     pub fn new(inner: R) -> Self {
         Self { inner }
     }
 }
 
-impl<R: Read> Read for RawLayerFailSafeReader<R> {
+impl<R: Read> Read for RawLayerTruncatedReader<R> {
     /// Wrapper on inner
     fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
         self.inner.read(into)
     }
 }
 
-impl<'a, R: Read> LayerFailSafeReader<'a, R> for RawLayerFailSafeReader<R> {
-    fn into_inner(self) -> Option<Box<dyn 'a + LayerFailSafeReader<'a, R>>> {
-        None
-    }
-
-    fn into_raw(self: Box<Self>) -> R {
-        self.inner
-    }
-}
+impl<R: Read> LayerTruncatedReader<'_, R> for RawLayerTruncatedReader<R> {}
 
 #[cfg(test)]
 mod tests {
@@ -170,10 +151,10 @@ mod tests {
         // Write
         let mut raw_w = Box::new(RawLayerWriter::new(buf));
         raw_w.write_all(&DATA).unwrap();
-        raw_w.finalize().unwrap();
+        let dest = raw_w.finalize().unwrap();
 
         // Read
-        let buf = Cursor::new(raw_w.into_raw());
+        let buf = Cursor::new(dest);
         let mut raw_r = Box::new(RawLayerReader::new(buf));
         raw_r.initialize().unwrap();
         let mut output = Vec::new();
@@ -196,10 +177,10 @@ mod tests {
         raw_w.write_all(&DATA).unwrap();
         let data2 = b"abcdef";
         raw_w.write_all(data2).unwrap();
-        raw_w.finalize().unwrap();
+        let dest = raw_w.finalize().unwrap();
 
         // Read
-        let buf = Cursor::new(raw_w.into_raw());
+        let buf = Cursor::new(dest);
         let mut raw_r = Box::new(RawLayerReader::new(buf));
         raw_r.initialize().unwrap();
         let mut output = [0u8; 4];
@@ -234,36 +215,34 @@ mod tests {
     }
 
     #[test]
-    fn basic_failsafe_ops() {
+    fn basic_truncated_ops() {
         let buf = Vec::new();
 
         // Write
         let mut raw_w = Box::new(RawLayerWriter::new(buf));
         raw_w.write_all(&DATA).unwrap();
-        raw_w.finalize().unwrap();
+        let buf = raw_w.finalize().unwrap();
 
         // Read
-        let buf = raw_w.into_raw();
-        let mut raw_r = Box::new(RawLayerFailSafeReader::new(buf.as_slice()));
+        let mut raw_r = Box::new(RawLayerTruncatedReader::new(buf.as_slice()));
         let mut output = Vec::new();
         raw_r.read_to_end(&mut output).unwrap();
         assert_eq!(output.as_slice(), &DATA);
     }
 
     #[test]
-    fn basic_failsafe_truncated() {
+    fn basic_truncated_truncated() {
         let buf = Vec::new();
 
         // Write
         let mut raw_w = Box::new(RawLayerWriter::new(buf));
         raw_w.write_all(&DATA).unwrap();
-        raw_w.finalize().unwrap();
+        let buf = raw_w.finalize().unwrap();
 
         // Read
-        let buf = raw_w.into_raw();
         // Truncate at the middle
         let stop = buf.len() / 2;
-        let mut raw_r = Box::new(RawLayerFailSafeReader::new(&buf[..stop]));
+        let mut raw_r = Box::new(RawLayerTruncatedReader::new(&buf[..stop]));
         let mut output = Vec::new();
         raw_r.read_to_end(&mut output).unwrap();
         // Thanks to the raw layer construction, we can recover `stop` bytes

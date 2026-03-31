@@ -24,7 +24,7 @@ int main()
     MLAStatus status;
 
     ArchiveInfo archive_info;
-    FILE *f = fopen("../../../../samples/archive_v1.mla", "r");
+    FILE *f = fopen("../../../../samples/archive_v2.mla", "r");
     if (!f)
     {
         fprintf(stderr, " [!] Cannot open file: %d\n", errno);
@@ -38,16 +38,23 @@ int main()
         fclose(f);
         return (int)status;
     }
-    if (archive_info.version != 1)
+    if (archive_info.version != 2)
     {
         fprintf(stderr, " [!] Invalid MLA archive version %x\n", archive_info.version);
         fclose(f);
         return 1;
     }
 
-    if (archive_info.layers != 3)
+    if (archive_info.is_encryption_enabled != 1)
     {
-        fprintf(stderr, " [!] Unexpected layers %x\n", archive_info.layers);
+        fprintf(stderr, " [!] Encryption should be enabled\n");
+        fclose(f);
+        return 2;
+    }
+
+    if (archive_info.is_signature_enabled != 1)
+    {
+        fprintf(stderr, " [!] Signature should be enabled\n");
         fclose(f);
         return 2;
     }

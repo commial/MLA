@@ -1,13 +1,11 @@
 name: Build & test
 
-permissions:
-  contents: write
+permissions: {}
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,62 +17,77 @@ jobs:
         build: [linux, macos, windows]
         include:
           - build: linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - build: macos
-            os: macos-latest
+            os: macos-15
           - build: windows
-            os: windows-latest
+            os: windows-2025
+            extension: .exe
+          - build: windows7-i686 # Win7-compatible build using tier 3 target
+            os: windows-2025
+            target: i686-win7-windows-msvc
+            cargo_build: --target i686-win7-windows-msvc -Z build-std # Build std from source, needed for tier 3 target
+            extension: .exe
+          - build: windows7-x86_64 # Win7-compatible build using tier 3 target
+            os: windows-2025
+            target: x86_64-win7-windows-msvc
+            cargo_build: --target x86_64-win7-windows-msvc -Z build-std # Build std from source, needed for tier 3 target
             extension: .exe
 
     runs-on: ${{matrix.os}}
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
       with:
         toolchain: stable
     - name: Build
       env:
         RUSTFLAGS: -D warnings
-      uses: actions-rs/cargo@v1
+      uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
       with:
         command: build
         args: --release --all --exclude mla-fuzz-afl --verbose
-    - name: Run tests
+    - name: Run tests (Windows)
+      # as rustdoc.exe has stack overflows with current tests (likely due to ml-dsa expansion) in mla/lib.rs
+      if: matrix.os == 'windows-2025'
+      run: cargo test --all --lib --bins --tests --exclude mla-fuzz-afl --release --verbose
+    - name: Run tests (Linux/macOS)
+      if: matrix.os != 'windows-2025'
       run: cargo test --all --exclude mla-fuzz-afl --release --verbose
     - name: Upload resulting 'mlar'
-      uses: actions/upload-artifact@v1
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
       with:
         name: ${{ matrix.build }}
         path: ./target/release/mlar${{ matrix.extension }}
 
   long-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
       with:
         toolchain: stable
     - name: Run long tests
       run: cd mla && cargo test --release -- --ignored
 
   all-features:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
       with:
         toolchain: stable
     - name: Run long tests
       run: cargo test --all-features --all --exclude mla-fuzz-afl --exclude mla-bindings-c --release
 
   test-bindings-c-cpp-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
       with:
         toolchain: stable
     - name: Run C bindings tests on Linux
@@ -102,16 +115,15 @@ jobs:
             msvc_platform: Win32
           - target: x86_64-pc-windows-msvc
             msvc_platform: x64
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
       with:
-        # Avoid a regression of Cargo, breaking at link time
-        toolchain: 1.69
+        toolchain: stable
         default: true
         target: ${{ matrix.target }}
-    - uses: microsoft/setup-msbuild@v1.0.2
+    - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0
     - name: Compile C/CPP bindings test program for Windows
       working-directory: bindings/C/tests/windows-msvc/
       run: msbuild mla-bindings-test.sln /p:Platform=${{ matrix.msvc_platform }} /p:Configuration=${{ matrix.version }}
@@ -120,17 +132,17 @@ jobs:
       run: ./${{ matrix.msvc_platform }}/${{ matrix.version }}/mla-bindings-test.exe
 
   afl-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: stable
       - name: Install dependencies
         run: sudo apt-get install llvm
       - name: Install cargo-afl binary crate
-        uses: actions-rs/install@v0.1
+        uses: actions-rs/install@9da1d2adcfe5e7c16992e8242ca33a56b6d9b101 # v0.1.2
         with:
           crate: cargo-afl
           version: latest
@@ -141,10 +153,10 @@ jobs:
         run: cargo afl build
 
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: stable
           components: rustfmt
@@ -152,45 +164,49 @@ jobs:
         run: cargo fmt --all -- --check
 
   audit:
-    runs-on: ubuntu-latest
+    permissions:
+      # allow to write a Check report which blocks PR on failures
+      # cf. https://github.com/actions-rs/audit-check/blob/35b7b53b1e25b55642157ac01b4adceb5b9ebef3/src/reporter.ts#L147
+      checks: write
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Security audit
-        uses: actions-rs/audit-check@v1
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
-         token: ${{ secrets.GITHUB_TOKEN }}
+          # As documented in README, we do not care enough for side channel attacks to update to an rc version of ml-dsa. Will update when final ml-dsa version is released.
+          ignore: RUSTSEC-2025-0144
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: stable
           components: clippy
       - name: Install dependencies
         run: sudo apt-get install llvm
       - name: Install cargo-afl binary crate
-        uses: actions-rs/install@v0.1
+        uses: actions-rs/install@9da1d2adcfe5e7c16992e8242ca33a56b6d9b101 # v0.1.2
         with:
           crate: cargo-afl
           version: latest
           use-tool-cache: true
-      - uses: actions-rs/cargo@v1
+      - uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           command: clippy
           args: --all-targets -- -D warnings
 
   publish-dry-run:
-      runs-on: ubuntu-latest
+      runs-on: ubuntu-24.04
 
       steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: stable
-      - name: Dry-run publish curve25519-parser
-        run: cd curve25519-parser && cargo publish --dry-run
       - name: Dry-run publish mla
         run: cd mla && cargo publish --dry-run
       - name: Dry-run publish mlar

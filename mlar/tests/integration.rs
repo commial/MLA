@@ -1,18 +1,34 @@
 use assert_cmd::Command;
 use assert_fs::fixture::{FileWriteBin, NamedTempFile, TempDir};
+use mla::entry::EntryName;
 use permutate::Permutator;
-use rand::distributions::{Alphanumeric, Distribution, Standard};
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::distr::{Alphanumeric, Distribution, StandardUniform};
+use rand::rngs::StdRng;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, metadata, read_dir, File};
+use std::fs::{self, File, metadata, read_dir};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tar::Archive;
 
 const SIZE_FILE1: usize = 10 * 1024 * 1024;
 const SIZE_FILE2: usize = 10 * 1024 * 1024;
 const UTIL: &str = "mlar";
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut stack = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => (),
+            Component::ParentDir => {
+                stack.pop();
+            }
+            Component::Normal(os_str) => stack.push(os_str),
+        }
+    }
+    stack
+}
 
 struct TestFS {
     // Files ordered by names
@@ -36,7 +52,10 @@ fn setup() -> TestFS {
 
     // `file2.bin`: Use full charset for bad compression
     let mut rng: StdRng = SeedableRng::from_seed([0u8; 32]);
-    let data: Vec<u8> = Standard.sample_iter(&mut rng).take(SIZE_FILE2).collect();
+    let data: Vec<u8> = StandardUniform
+        .sample_iter(&mut rng)
+        .take(SIZE_FILE2)
+        .collect();
     tmp_file2.write_binary(data.as_slice()).unwrap();
 
     // `file3.bin`: tiny file
@@ -91,49 +110,15 @@ fn ensure_tar_content(tar_file: &Path, files: &[NamedTempFile]) {
     assert_eq!(fname2content.len(), 0);
 }
 
-fn ensure_directory_content(directory: &Path, files: &[NamedTempFile]) {
-    // basename -> expected content
-    let mut fname2content = HashMap::new();
-
-    for file in files {
-        let mut content = Vec::new();
-        File::open(file.path())
-            .unwrap()
-            .read_to_end(&mut content)
-            .unwrap();
-        fname2content.insert(file.path().file_name().unwrap(), content);
-    }
-
-    for entry in glob::glob(&(directory.to_string_lossy() + "/**/*")).unwrap() {
-        let entry = entry.unwrap();
-        if entry.metadata().unwrap().is_dir() {
-            // Ignore directories
-            continue;
-        }
-        let fname = entry.file_name().unwrap();
-
-        // Ensure the content is the expected one
-        let mut content = Vec::new();
-        File::open(&entry)
-            .unwrap()
-            .read_to_end(&mut content)
-            .unwrap();
-        assert_eq!(&content, fname2content.get(fname).unwrap());
-
-        // Prepare for last check: correctness and completeness
-        fname2content.remove(fname);
-    }
-    // Ensure all files have been used
-    assert_eq!(fname2content.len(), 0);
-}
-
 fn file_list_append_from_dir(dir: &Path, file_list: &mut Vec<String>) {
     for entry in read_dir(dir).unwrap() {
         let new_path = entry.unwrap().path();
         if new_path.is_dir() {
             file_list_append_from_dir(&new_path, file_list);
         } else {
-            file_list.push(new_path.to_string_lossy().to_string());
+            let entry_name = EntryName::from_path(new_path).unwrap();
+            let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+            file_list.push(escaped);
         }
     }
 }
@@ -141,6 +126,9 @@ fn file_list_append_from_dir(dir: &Path, file_list: &mut Vec<String>) {
 #[test]
 fn test_help() {
     // `mlar --help`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("--help");
 
@@ -153,141 +141,206 @@ fn test_help() {
 #[test]
 fn test_create_from_dir() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
-    // Temporary directory to test recursive file addition
+    // Temporary directory with nested structure
     let tmp_dir = TempDir::new().unwrap();
-    let subfile1_path = tmp_dir.path().join("subfile1");
+    let entry1_path = tmp_dir.path().join("entry1");
     let subdir_path = tmp_dir.path().join("subdir");
-    let subfile2_path = subdir_path.join("subfile2");
+    let entry2_path = subdir_path.join("entry2");
 
-    std::fs::write(subfile1_path, "Test1").unwrap();
-    std::fs::create_dir(subdir_path).unwrap();
-    std::fs::write(subfile2_path, "Test2").unwrap();
+    std::fs::write(&entry1_path, "Test1").unwrap();
+    std::fs::create_dir(&subdir_path).unwrap();
+    std::fs::write(&entry2_path, "Test2").unwrap();
 
-    // `mlar create -o output.mla -p samples/test_x25519_pub.pem <tmp_dir>`
+    // Collect paths from directory into file_list
+    let mut file_list: Vec<String> = Vec::new();
+    file_list_append_from_dir(tmp_dir.path(), &mut file_list);
+
+    // Prepare expected stderr with " adding: {path}\n"
+    let mut expected_stderr = String::new();
+    for path in &file_list {
+        expected_stderr.push_str(format!(" adding: {path}\n").as_str());
+    }
+
+    // `mlar create --unsigned -o output.mla -p samples/test_mlakey.mlapub <tmp_dir>`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_public);
-
-    cmd.arg(tmp_dir.path());
-
-    let mut file_list: Vec<String> = Vec::new();
-    // The exact order of the files in the archive depends on the order of the
-    // result of `read_dir` which is plateform and filesystem dependent.
-    file_list_append_from_dir(tmp_dir.path(), &mut file_list);
+        .arg(public_key)
+        .arg(tmp_dir.path());
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stderr(file_list.join("\n") + "\n");
+    cmd.assert().success().stderr(expected_stderr);
 
-    // `mlar list -i output.mla -k samples/test_x25519.pem`
+    // Sort file list for consistent output
+    // The exact order of the files in the archive depends on the order of the
+    // result of `read_dir` which is plateform and filesystem dependent.
+    file_list.sort();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let expected_stdout = file_list.join("\n") + "\n";
+
+    // `mlar list -i output.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_private);
+        .arg(private_key);
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    file_list.sort();
-    assert.success().stdout(file_list.join("\n") + "\n");
+    cmd.assert().success().stdout(expected_stdout);
 }
 
 #[test]
 fn test_create_filelist_stdin() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -p samples/test_x25519_pub.pem -`
+    // Build the stdin file list
+    let mut file_list_stdin = String::new();
+    for file in &testfs.files {
+        file_list_stdin.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+    }
+
+    // Expected stderr:  adding: <escaped> (<size> bytes)
+    let mut expected_stderr = String::new();
+
+    // Expected stdout: plain paths (escaped)
+    let mut expected_stdout = String::new();
+
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
+        expected_stdout.push_str(format!("{escaped}\n").as_str());
+    }
+
+    // `mlar create --unsigned -o output.mla -p samples/test_mlakey.mlapub -`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_public);
+        .arg(public_key)
+        .arg("--stdin-filepath-list");
 
-    cmd.arg("-");
     println!("{cmd:?}");
+    cmd.write_stdin(file_list_stdin);
+    println!("{expected_stderr:?}");
 
-    let mut file_list = String::new();
-    for file in &testfs.files {
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
-    }
-    cmd.write_stdin(String::from(&file_list));
-    println!("{file_list:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
-    // `mlar list -i output.mla -k samples/test_x25519.pem`
+    // `mlar list -i output.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_private);
+        .arg(private_key);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stdout(file_list);
+    assert.success().stdout(expected_stdout);
 }
 
 #[test]
 fn test_create_list_tar() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let tar_file = NamedTempFile::new("output.tar").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let sender_public_key = Path::new("../samples/test_mlakey_archive_v2_sender.mlapub");
+    let sender_private_key = Path::new("../samples/test_mlakey_archive_v2_sender.mlapriv");
+    let receiver_public_key = Path::new("../samples/test_mlakey_archive_v2_receiver.mlapub");
+    let receiver_private_key = Path::new("../samples/test_mlakey_archive_v2_receiver.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -p samples/test_x25519_pub.pem file1.bin file2.bin file3.bin`
+    // `mlar create -o output.mla -p samples/test_mlakey.mlapub file1.bin file2.bin file3.bin`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_public);
+        .arg(receiver_public_key)
+        .arg("-k")
+        .arg(sender_private_key);
 
-    let mut file_list = String::new();
+    let mut file_list = String::new(); // For stdout (list)
+    let mut expected_stderr = String::new(); // For stderr (create)
+
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        file_list.push_str(format!("{escaped}\n").as_str());
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
-    // `mlar list -i output.mla -k samples/test_x25519.pem`
+    // `mlar list -i output.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
         .arg("-i")
         .arg(mlar_file.path())
+        .arg("-p")
+        .arg(sender_public_key)
         .arg("-k")
-        .arg(ecc_private);
+        .arg(receiver_private_key);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     assert.success().stdout(file_list);
 
-    // `mlar to-tar -i output.mla -k samples/test_x25519.pem -o output.tar`
+    // `mlar to-tar -i output.mla -k samples/test_mlakey.mlapriv -o output.tar`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("to-tar")
         .arg("-i")
         .arg(mlar_file.path())
+        .arg("-p")
+        .arg(sender_public_key)
         .arg("-k")
-        .arg(ecc_private)
+        .arg(receiver_private_key)
         .arg("-o")
         .arg(tar_file.path());
 
@@ -300,41 +353,57 @@ fn test_create_list_tar() {
 }
 
 #[test]
-fn test_truncated_repair_list_tar() {
+fn test_truncated_clean_truncated_list_tar() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let mlar_repaired_file = NamedTempFile::new("repaired.mla").unwrap();
+    let mlar_clean_truncated_file = NamedTempFile::new("clean_truncated.mla").unwrap();
     let tar_file = NamedTempFile::new("output.tar").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -p samples/test_x25519_pub.pem file1.bin file2.bin file3.bin`
+    // Prepare expected outputs:
+    // 1. For create command stderr (with prefix)
+    let mut file_list = String::new(); // Sorted by position in archive
+    // 2. For list command stdout (plain file list, no prefix)
+    let mut file_list_no_last_plain = String::new();
+
+    for file in &testfs.files {
+        if file.path() != testfs.files_archive_order.last().unwrap() {
+            let entry_name = EntryName::from_path(file.path()).unwrap();
+            let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+            file_list_no_last_plain.push_str(format!("{escaped}\n").as_str());
+        }
+    }
+
+    for path in &testfs.files_archive_order {
+        let entry_name = EntryName::from_path(path).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        file_list.push_str(format!(" adding: {escaped}\n").as_str());
+    }
+
+    // `mlar create --unsigned -o output.mla -p samples/test_mlakey.mlapub file1.bin file2.bin file3.bin`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_public);
+        .arg(public_key);
 
-    let mut file_list = String::new(); // Sorted by position in archive
-    let mut file_list_no_last = String::new(); // Sorted by name
-    for file in &testfs.files {
-        if file.path() != testfs.files_archive_order.last().unwrap() {
-            file_list_no_last.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
-        }
-    }
     for path in &testfs.files_archive_order {
         cmd.arg(path);
-        file_list.push_str(format!("{}\n", path.to_string_lossy()).as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(file_list);
 
-    // Truncate output.mla
+    // Truncate output.mla to simulate corruption
     let mut data = Vec::new();
     File::open(mlar_file.path())
         .unwrap()
@@ -345,43 +414,57 @@ fn test_truncated_repair_list_tar() {
         .write_all(&data[..data.len() * 6 / 7])
         .unwrap();
 
-    // `mlar repair -i output.mla -k samples/test_x25519.pem -p samples/test_x25519_pub.pem -o repaired.mla`
+    // `mlar clean-truncated --unsigned --uncompressed -i output.mla -k samples/test_mlakey.mlapriv -p samples/test_mlakey.mlapub -o clean_truncated.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("repair")
+    cmd.arg("clean-truncated")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_private)
-        .arg("-p")
-        .arg(ecc_public)
+        .arg(private_key)
+        .arg("--out-pub")
+        .arg(public_key)
+        .arg("--unsigned")
+        .arg("--uncompressed")
         .arg("-o")
-        .arg(mlar_repaired_file.path());
+        .arg(mlar_clean_truncated_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     assert.success();
 
-    // `mlar list -i repaired.mla -k samples/test_x25519.pem`
+    // `mlar list -i clean_truncated.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
-        .arg(mlar_repaired_file.path())
+        .arg(mlar_clean_truncated_file.path())
         .arg("-k")
-        .arg(ecc_private);
+        .arg(private_key);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    // Do not consider the last file for test after trunc, as we truncate at
-    // 6 / 7 (last file being really small)
-    assert.success().stdout(file_list_no_last);
+    // Expect plain entries list for the `clean-truncated` list, without last truncated file
+    // as truncated at 6 / 7, last file being really small
+    assert.success().stdout(file_list_no_last_plain);
 
-    // `mlar to-tar -i output.mla -k samples/test_x25519.pem -o output.tar`
+    // `mlar to-tar -i output.mla -k samples/test_mlakey.mlapriv -o output.tar`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("to-tar")
+        .arg("--skip-signature-verification")
         .arg("-i")
-        .arg(mlar_repaired_file.path())
+        .arg(mlar_clean_truncated_file.path())
         .arg("-k")
-        .arg(ecc_private)
+        .arg(private_key)
         .arg("-o")
         .arg(tar_file.path());
 
@@ -392,14 +475,14 @@ fn test_truncated_repair_list_tar() {
     // Inspect the created TAR file
     let mut arch = Archive::new(File::open(tar_file.path()).unwrap());
 
-    // basename -> expected content
+    // basename -> expected content map
     let mut fname2content = HashMap::new();
 
-    // Do not consider the last file for test after trunc
+    // Do not consider the last file for test after truncation
     for file in &testfs.files_archive_order[..testfs.files_archive_order.len() - 1] {
         let mut content = Vec::new();
         File::open(file).unwrap().read_to_end(&mut content).unwrap();
-        fname2content.insert(file.file_name().unwrap(), content);
+        fname2content.insert(file.file_name().unwrap().to_owned(), content);
     }
 
     for file in arch.entries().unwrap() {
@@ -409,8 +492,7 @@ fn test_truncated_repair_list_tar() {
         let pbuf = file.header().path().unwrap().to_path_buf();
         let fname = pbuf.file_name().unwrap();
 
-        // Ensure the extracted content is the same as the expected one, even if
-        // truncated (ie, all the bytes must be correct, but the end can be missing)
+        // Ensure the extracted content is correct (partial allowed due to truncation)
         let mut content = Vec::new();
         file.read_to_end(&mut content).unwrap();
         assert_eq!(
@@ -420,91 +502,291 @@ fn test_truncated_repair_list_tar() {
         // Ensure we have at least one byte
         assert_ne!(content.len(), 0);
 
-        // Prepare for last check: correctness and completeness
+        // Remove used files to check completeness
         fname2content.remove(fname);
     }
-    // Ensure all files have been used
+    // Ensure all expected files have been matched
     assert_eq!(fname2content.len(), 0);
 }
 
 #[test]
-fn test_multiple_keys() {
-    // Key parsing is common for each subcommands, so test only one: `list`
+fn test_clean_truncated_auth_unauth() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let ecc_publics = [
-        Path::new("../samples/test_x25519_pub.pem"),
-        Path::new("../samples/test_x25519_3_pub.pem"),
+    let mlar_clean_truncated_file = NamedTempFile::new("clean_truncated.mla").unwrap();
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
+
+    // Create files
+    let testfs = setup();
+
+    for i in 0..3 {
+        // Prepare expected outputs for create and list commands
+        let entry_name = EntryName::from_path(testfs.files[i].path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+
+        let create_stderr = format!(" adding: {escaped}\n");
+        let list_stdout = format!("{escaped}\n");
+
+        // Create archive with encrypt layer
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("create")
+            .arg("-o")
+            .arg(mlar_file.path())
+            .arg("--unsigned")
+            .arg("--uncompressed")
+            .arg("-p")
+            .arg(public_key)
+            .arg(testfs.files[i].path());
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        assert.success().stderr(create_stderr.clone());
+
+        // List archive content
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("list")
+            .arg("--skip-signature-verification")
+            .arg("-i")
+            .arg(mlar_file.path())
+            .arg("-k")
+            .arg(private_key);
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        assert.success().stdout(list_stdout.clone());
+
+        // Truncate the archive file (~6/7 size)
+        let mut data = Vec::new();
+        File::open(mlar_file.path())
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        File::create(mlar_file.path())
+            .unwrap()
+            .write_all(&data[..data.len() * 6 / 7])
+            .unwrap();
+
+        // Attempt `clean-truncated` (authenticated)
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("clean-truncated")
+            .arg("--skip-signature-verification")
+            .arg("-i")
+            .arg(mlar_file.path())
+            .arg("-k")
+            .arg(private_key)
+            .arg("--out-pub")
+            .arg(public_key)
+            .arg("-o")
+            .arg(mlar_clean_truncated_file.path())
+            .arg("--unsigned")
+            .arg("--uncompressed");
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        // For file3.bin, `clean-truncated` is expected to fail as the file is really small
+        if testfs.files[i]
+            .path()
+            .to_string_lossy()
+            .contains("file3.bin")
+        {
+            assert.failure();
+        } else {
+            assert.success();
+        }
+
+        // Try to read content from `clean-truncated` archive (authenticated)
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("cat")
+            .arg("--skip-signature-verification")
+            .arg("-i")
+            .arg(mlar_clean_truncated_file.path())
+            .arg("-k")
+            .arg(private_key)
+            .arg(testfs.files[i].path());
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        let output_auth = assert.get_output();
+
+        // Remove `clean-truncated` file to test unauthenticated `clean-truncated`
+        let _ = std::fs::remove_file(mlar_clean_truncated_file.path());
+
+        // Repair allowing unauthenticated data
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("clean-truncated")
+            .arg("--allow-unauthenticated-data")
+            .arg("--skip-signature-verification")
+            .arg("-i")
+            .arg(mlar_file.path())
+            .arg("-k")
+            .arg(private_key)
+            .arg("--out-pub")
+            .arg(public_key)
+            .arg("-o")
+            .arg(mlar_clean_truncated_file.path())
+            .arg("--unsigned")
+            .arg("--uncompressed");
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        assert.success();
+
+        // Read content from `clean-truncated` archive (unauthenticated)
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("cat")
+            .arg("--skip-signature-verification")
+            .arg("-i")
+            .arg(mlar_clean_truncated_file.path())
+            .arg("-k")
+            .arg(private_key)
+            .arg(testfs.files[i].path());
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        let output_unauth = assert.get_output();
+
+        // Output unauthenticated must be longer than the authenticated one
+        if testfs.files[i]
+            .path()
+            .to_string_lossy()
+            .contains("file3.bin")
+        {
+            // for file3, the truncation falls in MLA entries layer magic, thus we cannot `clean-truncated` anything
+            assert_eq!(output_unauth.stdout.len(), 0);
+            assert_eq!(output_auth.stdout.len(), 0);
+        } else {
+            // For others, unauthenticated output must be at least as large as authenticated
+            assert!(output_unauth.stdout.len() >= output_auth.stdout.len());
+        }
+
+        // Authenticated output must match start of unauthenticated output
+        assert_eq!(
+            output_auth.stdout,
+            output_unauth.stdout[..output_auth.stdout.len()]
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(mlar_file.path());
+        let _ = std::fs::remove_file(mlar_clean_truncated_file.path());
+    }
+}
+
+#[test]
+fn test_multiple_keys() {
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+    let public_keys = [
+        Path::new("../samples/test_mlakey.mlapub"),
+        Path::new("../samples/test_mlakey_3.mlapub"),
     ];
-    let ecc_privates = [
-        Path::new("../samples/test_x25519.pem"),
-        Path::new("../samples/test_x25519_2.pem"),
+    let private_keys = [
+        Path::new("../samples/test_mlakey.mlapriv"),
+        Path::new("../samples/test_mlakey_2.mlapriv"),
     ];
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -p samples/test_x25519_pub.pem -p samples/test_x25519_3_pub.pem file1.bin file2.bin file3.bin`
+    // Prepare expected stderr (for `create`) with full info lines
+    let mut expected_stderr = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
+    }
+
+    // Prepare expected stdout (for `list`) with just file paths, no extra info
+    let mut expected_stdout = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stdout.push_str(format!("{escaped}\n").as_str());
+    }
+
+    // Run `mlar create` with compress + encrypt and public keys
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_publics[0])
+        .arg(public_keys[0])
         .arg("-p")
-        .arg(ecc_publics[1]);
+        .arg(public_keys[1]);
 
-    let mut file_list = String::new();
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
     }
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    cmd.assert().success().stderr(expected_stderr.clone());
 
-    // Ensure:
-    // - we can read with one correct, one bad private key
-    // - we can read with only the second correct private key
-    // - we cannot read with only a bad private key
-
-    // `mlar list -i output.mla -k samples/test_x25519.pem -k samples/test_x25519_2.pem`
+    // Run `mlar list` with both private keys
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_privates[0])
+        .arg(private_keys[0])
         .arg("-k")
-        .arg(ecc_privates[1]);
+        .arg(private_keys[1]);
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stdout(String::from(&file_list));
+    cmd.assert().success().stdout(expected_stdout.clone());
 
-    // `mlar list -i output.mla -k samples/test_x25519_3.pem`
+    // Run `mlar list` with second private key only
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(Path::new("../samples/test_x25519_3.pem"));
+        .arg(public_keys[1].with_extension("mlapriv"));
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stdout(String::from(&file_list));
+    cmd.assert().success().stdout(expected_stdout.clone());
 
-    // `mlar list -i output.mla -k samples/test_x25519_2.pem`
+    // Run `mlar list` with wrong private key (should fail)
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_privates[1]);
+        .arg(private_keys[1]);
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.failure();
+    cmd.assert().failure();
 }
 
 #[test]
@@ -518,28 +800,37 @@ fn test_multiple_compression_level() {
     let testfs = setup();
 
     for (dest, compression_level) in &[(mlar_file_q0.path(), "0"), (mlar_file_q5.path(), "5")] {
-        // `mlar create -o {dest} -l compress -q {compression_level} file1.bin file2.bin file3.bin`
+        // `mlar create -o {dest} --unencrypted --unsigned -q {compression_level} file1.bin file2.bin file3.bin`
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
         let mut cmd = Command::cargo_bin(UTIL).unwrap();
         cmd.arg("create")
             .arg("-o")
             .arg(dest)
-            .arg("-l")
-            .arg("compress")
+            .arg("--unencrypted")
+            .arg("--unsigned")
             .arg("-q")
             .arg(compression_level);
 
-        let mut file_list = String::new();
+        let mut expected_stderr = String::new();
+        expected_stderr.push_str("[WARNING] Output archive will NOT be encrypted!\n");
         for file in &testfs.files {
             cmd.arg(file.path());
-            file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+
+            let entry_name = EntryName::from_path(file.path()).unwrap();
+            let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+
+            expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
         }
+        expected_stderr.push_str("[WARNING] Output archive was NOT encrypted!\n");
 
         println!("{cmd:?}");
         let assert = cmd.assert();
-        assert.success().stderr(String::from(&file_list));
+        assert.success().stderr(expected_stderr);
     }
 
-    // Hopefully, if compression works, q0 must be smaller than q5
+    // Hopefully, if compression works, q5 must be smaller than q0
     let q0_size = metadata(mlar_file_q0.path()).unwrap().len();
     let q5_size = metadata(mlar_file_q5.path()).unwrap().len();
     assert!(q5_size < q0_size);
@@ -547,8 +838,13 @@ fn test_multiple_compression_level() {
     // Ensure files are correct
     for (src, tar_name) in [(mlar_file_q0, &tar_file_q0), (mlar_file_q5, &tar_file_q5)] {
         // `mlar to-tar -i {src} -o {tar_name}`
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
         let mut cmd = Command::cargo_bin(UTIL).unwrap();
         cmd.arg("to-tar")
+            .arg("--skip-signature-verification")
+            .arg("--accept-unencrypted")
             .arg("-i")
             .arg(src.path())
             .arg("-o")
@@ -558,6 +854,7 @@ fn test_multiple_compression_level() {
         let assert = cmd.assert();
         assert.success();
     }
+
     ensure_tar_content(tar_file_q0.path(), &testfs.files);
     ensure_tar_content(tar_file_q5.path(), &testfs.files);
 }
@@ -566,65 +863,90 @@ fn test_multiple_compression_level() {
 fn test_convert() {
     // Create an archive with one public key, convert it to use only another key
     // without compression, then verify the size and the content of the archive
+
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let mlar_file_converted = NamedTempFile::new("convert.mla").unwrap();
     let tar_file = NamedTempFile::new("output.tar").unwrap();
-    let ecc_public1 = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private1 = Path::new("../samples/test_x25519.pem");
-    let ecc_public2 = Path::new("../samples/test_x25519_2_pub.pem");
-    let ecc_private2 = Path::new("../samples/test_x25519_2.pem");
+
+    let public_key1 = Path::new("../samples/test_mlakey.mlapub");
+    let private_key1 = Path::new("../samples/test_mlakey.mlapriv");
+    let public_key2 = Path::new("../samples/test_mlakey_2.mlapub");
+    let private_key2 = Path::new("../samples/test_mlakey_2.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -p samples/public_1024.der file1.bin file2.bin file3.bin`
+    // === Step 1: Create the original archive
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
         .arg("-p")
-        .arg(ecc_public1);
+        .arg(public_key1);
 
-    let mut file_list = String::new();
+    let mut create_stderr = String::new();
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        create_stderr.push_str(format!(" adding: {escaped}\n").as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(create_stderr.clone());
 
-    // `mlar convert -i output.mla -k samples/private_1024.der -l encrypt -o convert.mla -p samples/public_2048.der`
+    // === Step 2: Convert the archive to a new key
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("convert")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_private1)
-        .arg("-l")
-        .arg("encrypt")
+        .arg(private_key1)
+        .arg("--unsigned")
+        .arg("--uncompressed")
         .arg("-o")
         .arg(mlar_file_converted.path())
-        .arg("-p")
-        .arg(ecc_public2);
+        .arg("--out-pub")
+        .arg(public_key2);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
 
-    // Hopefully, compressed must be smaller than without compression
+    // Correct expected stderr for `convert`
+    let mut convert_stderr = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        convert_stderr.push_str(format!(" converting: {}\n", escaped.replace('/', "%2f")).as_str());
+    }
+
+    assert.success().stderr(convert_stderr);
+
+    // === Step 3: Verify that conversion did not compress (size should be bigger)
     let size_output = metadata(mlar_file.path()).unwrap().len();
     let size_convert = metadata(mlar_file_converted.path()).unwrap().len();
     assert!(size_output < size_convert);
 
-    // `mlar to-tar -i convert.mla -k samples/private_2048.der -o output.tar`
+    // === Step 4: Extract converted archive to TAR
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("to-tar")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file_converted.path())
         .arg("-k")
-        .arg(ecc_private2)
+        .arg(private_key2)
         .arg("-o")
         .arg(tar_file.path());
 
@@ -632,7 +954,7 @@ fn test_convert() {
     let assert = cmd.assert();
     assert.success();
 
-    // Inspect the created TAR file
+    // === Step 5: Inspect the created TAR file content
     ensure_tar_content(tar_file.path(), &testfs.files);
 }
 
@@ -641,42 +963,58 @@ fn test_stdio() {
     // Create an archive on stdout, and check it
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let tar_file = NamedTempFile::new("output.tar").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o - -p samples/test_x25519_pub.pem file1.bin file2.bin file3.bin`
-    let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("create")
-        .arg("-o")
-        .arg("-")
-        .arg("-p")
-        .arg(ecc_public);
-
+    // Prepare expected stderr output for create command with  lines
     let mut file_list = String::new();
     for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        file_list.push_str(format!(" adding: {escaped}\n").as_str());
+    }
+
+    // `mlar create -o - --unsigned -p samples/test_mlakey.mlapub file1.bin file2.bin file3.bin`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg("-") // output to stdout
+        .arg("-p")
+        .arg(public_key);
+
+    for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     let archive_data = assert.get_output().stdout.clone();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(file_list);
 
+    // Write archive data to temporary file for further testing
     File::create(mlar_file.path())
         .unwrap()
         .write_all(&archive_data)
         .unwrap();
-    // `mlar to-tar -i output.mla -k samples/test_x25519.pem -o output.tar`
+
+    // `mlar to-tar -i output.mla -k samples/test_mlakey.mlapriv -o output.tar`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("to-tar")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-k")
-        .arg(ecc_private)
+        .arg(private_key)
         .arg("-o")
         .arg(tar_file.path());
 
@@ -684,17 +1022,17 @@ fn test_stdio() {
     let assert = cmd.assert();
     assert.success();
 
-    // Inspect the created TAR file
+    // Inspect the created TAR file content matches original test files
     ensure_tar_content(tar_file.path(), &testfs.files);
 }
 
 #[test]
 fn test_multi_fileorders() {
-    // Create several archive with all possible file order. Result should be the same
+    // Create several archives with all possible file orders. Result should be the same
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let tar_file = NamedTempFile::new("output.tar").unwrap();
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
     // Create files
     let testfs = setup();
@@ -713,31 +1051,43 @@ fn test_multi_fileorders() {
             continue;
         }
 
-        // `mlar create -o output.mla -p samples/test_x25519_pub.pem file1.bin file2.bin file3.bin`
+        // `mlar create --unsigned -o output.mla -p samples/test_mlakey.mlapub file1.bin file2.bin file3.bin`
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
         let mut cmd = Command::cargo_bin(UTIL).unwrap();
         cmd.arg("create")
+            .arg("--unsigned")
             .arg("-o")
             .arg(mlar_file.path())
             .arg("-p")
-            .arg(ecc_public);
+            .arg(public_key);
 
-        let mut file_list = String::new();
+        let mut expected_stderr = String::new();
+
         for file in list {
             cmd.arg(file);
-            file_list.push_str(format!("{}\n", file.to_string_lossy()).as_str());
+
+            let entry_name = EntryName::from_path(file).unwrap();
+            let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+            expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
         }
 
         println!("{cmd:?}");
         let assert = cmd.assert();
-        assert.success().stderr(String::from(&file_list));
+        assert.success().stderr(expected_stderr);
 
-        // `mlar to-tar -i convert.mla -k samples/test_x25519.pem -o output.tar`
+        // `mlar to-tar -i convert.mla -k samples/test_mlakey.mlapriv -o output.tar`
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
         let mut cmd = Command::cargo_bin(UTIL).unwrap();
         cmd.arg("to-tar")
+            .arg("--skip-signature-verification")
             .arg("-i")
             .arg(mlar_file.path())
             .arg("-k")
-            .arg(ecc_private)
+            .arg(private_key)
             .arg("-o")
             .arg(tar_file.path());
 
@@ -747,6 +1097,8 @@ fn test_multi_fileorders() {
 
         // Inspect the created TAR file
         ensure_tar_content(tar_file.path(), &testfs.files);
+        let _ = std::fs::remove_file(mlar_file.path());
+        let _ = std::fs::remove_file(tar_file.path());
     }
 }
 
@@ -755,39 +1107,83 @@ fn test_verbose_listing() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let testfs = setup();
 
-    // `mlar create -l -o output.mla
+    // `mlar create --unsigned --unencrypted -o output.mla
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("create").arg("-l").arg("-o").arg(mlar_file.path());
+    cmd.arg("create")
+        .arg("--unsigned")
+        .arg("--unencrypted")
+        .arg("-o")
+        .arg(mlar_file.path());
 
-    let mut file_list = String::new();
+    // Build expected stderr with full " adding: ... (N bytes)" lines
+    let mut expected_stderr = String::new();
+    expected_stderr.push_str("[WARNING] Output archive will NOT be encrypted!\n");
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
     }
+    expected_stderr.push_str("[WARNING] Output archive was NOT encrypted!\n");
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
     // `mlar list -i output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("list").arg("-i").arg(mlar_file.path());
+    cmd.arg("list")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-i")
+        .arg(mlar_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stdout(file_list);
+
+    // The list command prints just the names (no INFO prefix), so:
+    let mut expected_stdout = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stdout.push_str(format!("{escaped}\n").as_str());
+    }
+
+    assert.success().stdout(expected_stdout);
 
     // `mlar list -v -i output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("list").arg("-v").arg("-i").arg(mlar_file.path());
+    cmd.arg("list")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-v")
+        .arg("-i")
+        .arg(mlar_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     assert.success();
 
     // `mlar list -vv -i output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("list").arg("-vv").arg("-i").arg(mlar_file.path());
+    cmd.arg("list")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-vv")
+        .arg("-i")
+        .arg(mlar_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
@@ -796,35 +1192,95 @@ fn test_verbose_listing() {
 
 #[test]
 fn test_extract() {
+    // This value should be bigger than FILE_WRITER_POOL_SIZE
+    const TEST_MANY_FILES_NB: usize = 5;
+    const SIZE_FILE: usize = 10;
+    const SEPARATOR: &str = "SEPARATOR";
+
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let mut testfs = setup();
+    let mut rng: StdRng = SeedableRng::from_seed([0u8; 32]);
+    let mut files = vec![];
+    let mut filenames = vec![];
 
-    // `mlar create -l -o output.mla
-    let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("create").arg("-l").arg("-o").arg(mlar_file.path());
+    // Create many files with random alphanumeric content
+    for i in 0..TEST_MANY_FILES_NB {
+        let tmp_file = NamedTempFile::new(format!("file{i}.bin")).unwrap();
+        let data: Vec<u8> = Alphanumeric.sample_iter(&mut rng).take(SIZE_FILE).collect();
+        tmp_file.write_binary(data.as_slice()).unwrap();
 
-    let mut file_list = String::new();
-    for file in &testfs.files {
-        cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+        files.push((tmp_file, data));
+        filenames.push(format!("file{i}.bin"));
     }
+
+    // Concatenate file data separated by SEPARATOR
+    let mut concatenated_data = Vec::new();
+    for (idx, (_tmp_file, data)) in files.iter().enumerate() {
+        if idx > 0 {
+            concatenated_data.extend(SEPARATOR.as_bytes());
+        }
+        concatenated_data.extend(data);
+    }
+
+    // Create archive passing multiple --filenames flags
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .arg("--stdin-data-separator")
+        .arg(SEPARATOR);
+
+    cmd.arg("--stdin-data-entry-names").arg(filenames.join(","));
+
+    cmd.write_stdin(concatenated_data);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
 
-    let mut file_list = String::new();
-    for file in &testfs.files {
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
-    }
+    assert.success();
 
-    // Test global (with all files)
-
-    // `mlar extract -v -i output.mla -o ouput_dir -g '*'`
+    // === 1. Linear extraction ===
     let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("extract")
         .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("-o")
+        .arg(output_dir.path());
+
+    println!("{cmd:?}");
+    let assert = cmd.assert();
+    assert.success();
+
+    for (filename, (_tmp_file, original_data)) in filenames.iter().zip(files.iter()) {
+        let extracted = fs::read(output_dir.path().join(filename)).unwrap();
+        assert_eq!(
+            extracted, *original_data,
+            "Mismatch in linear extract: {filename}"
+        );
+    }
+
+    // === 2. Glob extraction ===
+    let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("extract")
+        .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-o")
@@ -834,86 +1290,49 @@ fn test_extract() {
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stdout(file_list.clone());
-
-    ensure_directory_content(output_dir.path(), &testfs.files);
-
-    // Test linear extraction of all files
-
-    // `mlar extract -v -i output.mla -o ouput_dir`
-    let output_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("extract")
-        .arg("-v")
-        .arg("-i")
-        .arg(mlar_file.path())
-        .arg("-o")
-        .arg(output_dir.path());
-
-    println!("{cmd:?}");
-    let assert = cmd.assert();
-    let expected_output = format!(
-        "Extracting the whole archive using a linear extraction\n{}",
-        file_list
-    );
-    assert.success().stdout(expected_output);
-
-    ensure_directory_content(output_dir.path(), &testfs.files);
-
-    // Test extraction of one file explicitly
-    // `mlar extract -v -i output.mla -o ouput_dir file1`
-    let one_filename = &testfs.files_archive_order[0];
-    let mut one_file = Vec::new();
-    loop {
-        match testfs.files.pop() {
-            None => {
-                break;
-            }
-            Some(ntf) => {
-                if ntf.path() == one_filename {
-                    one_file.push(ntf);
-                }
-            }
-        }
+    let output_str = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    for filename in &filenames {
+        assert!(
+            output_str.contains(filename),
+            "Missing filename in stdout: {filename}",
+        );
     }
+    for (filename, (_tmp_file, original_data)) in filenames.iter().zip(files.iter()) {
+        let extracted = fs::read(output_dir.path().join(filename)).unwrap();
+        assert_eq!(
+            extracted, *original_data,
+            "Mismatch in glob extract: {filename}"
+        );
+    }
+
+    // === 3. Single file extraction ===
+    let single_file = &filenames[0];
+    let single_file_data = &files[0].1;
+
     let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("extract")
         .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-o")
         .arg(output_dir.path())
-        .arg(one_filename);
+        .arg(single_file);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert
-        .success()
-        .stdout(format!("{}\n", one_filename.to_string_lossy()));
+    assert.success().stdout(format!("{single_file}\n"));
 
-    ensure_directory_content(output_dir.path(), &one_file);
-
-    // Test extraction of one file through glob
-    // `mlar extract -v -i output.mla -o ouput_dir -g *1*`
-    let output_dir = TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("extract")
-        .arg("-v")
-        .arg("-i")
-        .arg(mlar_file.path())
-        .arg("-o")
-        .arg(output_dir.path())
-        .arg("-g")
-        .arg("*file1*");
-
-    println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert
-        .success()
-        .stdout(format!("{}\n", one_filename.to_string_lossy()));
-
-    ensure_directory_content(output_dir.path(), &one_file);
+    let extracted = fs::read(output_dir.path().join(single_file)).unwrap();
+    assert_eq!(
+        extracted, *single_file_data,
+        "Mismatch in single file extract: {single_file}"
+    );
 }
 
 #[test]
@@ -921,26 +1340,43 @@ fn test_cat() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let testfs = setup();
 
-    // `mlar create -l -o output.mla
+    // `mlar create --unencrypted --unsigned -o output.mla ...`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("create").arg("-l").arg("-o").arg(mlar_file.path());
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path());
 
-    let mut file_list = String::new();
+    let mut expected_stderr = String::new();
+    expected_stderr.push_str("[WARNING] Output archive will NOT be encrypted!\n");
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
     }
+    expected_stderr.push_str("[WARNING] Output archive was NOT encrypted!\n");
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
-    // `mlar cat -i output.mla file1`
+    // `mlar cat -i output.mla fileX`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("cat")
         .arg("-i")
         .arg(mlar_file.path())
-        .arg(&testfs.files_archive_order[2]);
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg(normalize(&testfs.files_archive_order[2]));
 
     println!("{cmd:?}");
     let assert = cmd.assert();
@@ -950,96 +1386,227 @@ fn test_cat() {
         .unwrap()
         .read_to_end(&mut expected_content)
         .unwrap();
+
     assert_eq!(assert.success().get_output().stdout, expected_content);
 }
 
 #[test]
-fn test_keygen() {
-    // Gen a keypair, create and list an archive using them
+fn test_shared_secret() {
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let output_dir = TempDir::new().unwrap();
-    let base_name = output_dir.path().join("key");
-    let testfs = setup();
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
-    // `mlar keygen tempdir/key`
-    let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("keygen").arg(&base_name);
-    cmd.assert().success();
+    // Temporary directory with nested structure
+    let tmp_dir = TempDir::new().unwrap();
+    let entry1_path = tmp_dir.path().join("entry1");
+    let subdir_path = tmp_dir.path().join("subdir");
+    let entry2_path = subdir_path.join("entry2");
 
-    // `mlar create -p tempdir/key.pub -o output.mla file1 file2 file3`
+    std::fs::write(&entry1_path, "Test1").unwrap();
+    std::fs::create_dir(&subdir_path).unwrap();
+    std::fs::write(&entry2_path, "Test2").unwrap();
+
+    // Collect paths from directory into file_list
+    let mut file_list: Vec<String> = Vec::new();
+    file_list_append_from_dir(tmp_dir.path(), &mut file_list);
+
+    // Prepare expected stderr with " adding: {path}\n"
+    let mut expected_stderr = String::new();
+    for path in &file_list {
+        expected_stderr.push_str(format!(" adding: {path}\n").as_str());
+    }
+
+    // `mlar create --unsigned -o output.mla -p samples/test_mlakey.mlapub <tmp_dir>`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
         .arg("-p")
-        .arg(base_name.with_extension("pub"))
+        .arg(public_key)
+        .arg(tmp_dir.path());
+
+    println!("{cmd:?}");
+    cmd.assert().success().stderr(expected_stderr);
+
+    // Sort file list for consistent output
+    // The exact order of the files in the archive depends on the order of the
+    // result of `read_dir` which is plateform and filesystem dependent.
+    file_list.sort();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let expected_stdout = file_list.join("\n") + "\n";
+
+    let metadata_file = NamedTempFile::new("metadata.bin").unwrap();
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("shared-secret")
+        .arg("get-decryption-metadata")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("-o")
+        .arg(metadata_file.path());
+    println!("{cmd:?}");
+    cmd.assert().success();
+
+    let shared_secret_file = NamedTempFile::new("shared_secret.bin").unwrap();
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("shared-secret")
+        .arg("decapsulate")
+        .arg("-m")
+        .arg(metadata_file.path())
+        .arg("-k")
+        .arg(private_key)
+        .arg("-o")
+        .arg(shared_secret_file.path());
+    println!("{cmd:?}");
+    cmd.assert().success();
+
+    // `mlar list -i output.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("list")
+        .arg("--skip-signature-verification")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("--shared-secret")
+        .arg(shared_secret_file.path());
+
+    println!("{cmd:?}");
+    cmd.assert().success().stdout(expected_stdout);
+}
+
+#[test]
+fn test_keygen() {
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+    let output_dir = TempDir::new().unwrap();
+    let base_path = output_dir.path().join("key");
+    let priv_path = base_path.with_extension("mlapriv");
+    let pub_path = base_path.with_extension("mlapub");
+    let testfs = setup();
+
+    // Generate keypair
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("keygen").arg(&base_path);
+    cmd.assert().success();
+
+    // Prepare expected stderr for create command
+    let mut expected_stderr = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
+    }
+
+    // Prepare expected stdout for list command (just file names)
+    let mut expected_stdout = String::new();
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stdout.push_str(format!("{escaped}\n").as_str());
+    }
+
+    // Create archive using public key
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unsigned")
+        .arg("-p")
+        .arg(&pub_path)
         .arg("-o")
         .arg(mlar_file.path());
 
-    let mut file_list = String::new();
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
     }
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    cmd.assert().success().stderr(expected_stderr.clone());
 
-    // `mlar list -k tempdir/key -i output.mla`
+    // List archive contents with private key
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
+        .arg("--skip-signature-verification")
         .arg("-k")
-        .arg(base_name)
+        .arg(&priv_path)
         .arg("-i")
         .arg(mlar_file.path());
 
     println!("{cmd:?}");
-    let assert = cmd.assert();
-    assert.success().stdout(file_list);
+    cmd.assert().success().stdout(expected_stdout.clone());
 }
 
-const PRIVATE_KEY_TESTSEED: [u8; 48] = [
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 110, 4, 34, 4, 32, 94, 121, 194, 104, 155, 90, 60, 64,
-    82, 240, 66, 106, 58, 170, 219, 60, 118, 22, 29, 161, 99, 243, 195, 174, 36, 134, 238, 189,
-    226, 45, 50, 34,
+const PRIVATE_KEY_TESTSEED_SHA256: [u8; 32] = [
+    191, 131, 153, 245, 17, 5, 250, 61, 127, 158, 12, 255, 2, 167, 1, 56, 23, 111, 148, 39, 160,
+    87, 221, 227, 27, 86, 50, 151, 247, 37, 225, 211,
 ];
 
-const PRIVATE_KEY_TESTSEED2: [u8; 48] = [
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 110, 4, 34, 4, 32, 149, 139, 7, 71, 128, 28, 248, 2,
-    227, 242, 22, 225, 219, 80, 100, 43, 179, 186, 25, 174, 243, 30, 246, 96, 133, 12, 240, 86, 17,
-    254, 140, 0,
+const PRIVATE_KEY_TESTSEED2_SHA256: [u8; 32] = [
+    131, 25, 203, 120, 50, 34, 145, 139, 38, 116, 171, 193, 88, 210, 99, 133, 8, 249, 244, 238,
+    130, 22, 109, 139, 79, 84, 3, 201, 147, 137, 97, 141,
 ];
 
 #[test]
 fn test_keygen_seed() {
     // Gen deterministic keypairs
     let output_dir = TempDir::new().unwrap();
-    let base_name = output_dir.path().join("key");
+    let base_path = output_dir.path().join("key");
+    let priv_path = base_path.with_extension("mlapriv");
+    let pub_path = base_path.with_extension("mlapub");
 
     // `mlar keygen tempdir/key -s TESTSEED`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("keygen").arg(&base_name).arg("-s").arg("TESTSEED");
+    cmd.arg("keygen").arg(&base_path).arg("-s").arg("TESTSEED");
     cmd.assert().success();
 
     let mut pkey_testseed = vec![];
-    File::open(&base_name)
+    File::open(&priv_path)
         .unwrap()
         .read_to_end(&mut pkey_testseed)
         .unwrap();
-    assert_eq!(pkey_testseed, PRIVATE_KEY_TESTSEED);
+    // Check the SHA256, as private key are ~3KB long
+    let hash_testseed = Sha256::digest(&pkey_testseed);
+    assert_eq!(hash_testseed, PRIVATE_KEY_TESTSEED_SHA256.into());
+    let _ = std::fs::remove_file(&priv_path);
+    let _ = std::fs::remove_file(&pub_path);
 
     // `mlar keygen tempdir/key -s TESTSEED2`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("keygen").arg(&base_name).arg("-s").arg("TESTSEED2");
+    cmd.arg("keygen").arg(&base_path).arg("-s").arg("TESTSEED2");
     cmd.assert().success();
 
-    let mut pkey_testseed = vec![];
-    File::open(&base_name)
+    let mut pkey_testseed2 = vec![];
+    File::open(&priv_path)
         .unwrap()
-        .read_to_end(&mut pkey_testseed)
+        .read_to_end(&mut pkey_testseed2)
         .unwrap();
-    assert_eq!(pkey_testseed, PRIVATE_KEY_TESTSEED2);
+    // Check the SHA256, as private key are ~3KB long
+    let hash_testseed2 = Sha256::digest(&pkey_testseed2);
 
-    assert_ne!(PRIVATE_KEY_TESTSEED, PRIVATE_KEY_TESTSEED2);
+    assert_eq!(hash_testseed2, PRIVATE_KEY_TESTSEED2_SHA256.into());
+
+    assert_ne!(PRIVATE_KEY_TESTSEED_SHA256, PRIVATE_KEY_TESTSEED2_SHA256);
 }
 
 #[test]
@@ -1049,20 +1616,25 @@ fn test_keyderive() {
     ├──["Child 1"]── key_child1
     │   └──["Child 1"]── key_child1_child1
     └──["Child 2"]── key_child2
-     */
-    let output_dir = TempDir::new().unwrap();
-    let key_parent = output_dir.path().join("key_parent");
-    let key_child1 = output_dir.path().join("key_child1");
-    let key_child2 = output_dir.path().join("key_child2");
-    let key_child1_child1 = output_dir.path().join("key_child1_child1");
-
-    //---------------- SETUP: Create and fill `keys` --------------
+    */
     struct Keys {
         parent: Vec<u8>,
         child1: Vec<u8>,
         child2: Vec<u8>,
         child1child1: Vec<u8>,
     }
+
+    let output_dir = TempDir::new().unwrap();
+    let key_parent_pfx = output_dir.path().join("key_parent");
+    let key_parent_priv = key_parent_pfx.with_extension("mlapriv");
+    let key_child1_pfx = output_dir.path().join("key_child1");
+    let key_child1_priv = key_child1_pfx.with_extension("mlapriv");
+    let key_child2_pfx = output_dir.path().join("key_child2");
+    let key_child2_priv = key_child2_pfx.with_extension("mlapriv");
+    let key_child1_child1_pfx = output_dir.path().join("key_child1_child1");
+    let key_child1_child1_priv = key_child1_child1_pfx.with_extension("mlapriv");
+
+    //---------------- SETUP: Create and fill `keys` --------------
     let mut keys = Keys {
         parent: vec![],
         child1: vec![],
@@ -1071,137 +1643,158 @@ fn test_keyderive() {
     };
 
     // `mlar keygen tempdir/key_parent`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("keygen").arg(&key_parent);
+    cmd.arg("keygen").arg(&key_parent_pfx);
     cmd.assert().success();
 
-    keys.parent = fs::read(&key_parent).unwrap();
+    keys.parent = fs::read(&key_parent_priv).unwrap();
 
     // `mlar keyderive tempdir/key_parent tempdir/key_child1 --path "Child 1"`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("keyderive")
-        .arg(&key_parent)
-        .arg(&key_child1)
+        .arg(&key_parent_priv)
+        .arg(&key_child1_pfx)
         .arg("-p")
         .arg("Child 1");
     cmd.assert().success();
 
-    keys.child1 = fs::read(&key_child1).unwrap();
+    keys.child1 = fs::read(&key_child1_priv).unwrap();
 
     // `mlar keyderive tempdir/key_parent tempdir/key_child2 --path "Child 2"`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("keyderive")
-        .arg(&key_parent)
-        .arg(&key_child2)
+        .arg(&key_parent_priv)
+        .arg(&key_child2_pfx)
         .arg("-p")
         .arg("Child 2");
     cmd.assert().success();
 
-    keys.child2 = fs::read(&key_child2).unwrap();
+    keys.child2 = fs::read(&key_child2_priv).unwrap();
 
     // `mlar keyderive tempdir/key_child1 tempdir/key_child1_child1 --path "Child 1"`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("keyderive")
-        .arg(&key_child1)
-        .arg(&key_child1_child1)
+        .arg(&key_child1_priv)
+        .arg(&key_child1_child1_pfx)
         .arg("-p")
         .arg("Child 1");
     cmd.assert().success();
 
-    keys.child1child1 = fs::read(&key_child1_child1).unwrap();
+    keys.child1child1 = fs::read(&key_child1_child1_priv).unwrap();
 
     //---------------- END OF SETUP -----------------
 
     // Assert all keys are different
     let v: HashSet<_> = [&keys.parent, &keys.child1, &keys.child2, &keys.child1child1]
         .iter()
-        .cloned()
+        .copied()
         .collect();
     assert_eq!(v.len(), 4);
 
     // Ensure path is deterministic
 
-    let key_tmp = output_dir.path().join("key_tmp");
+    let key_tmp_pfx = output_dir.path().join("key_tmp");
+    let key_tmp_priv = key_tmp_pfx.with_extension("mlapriv");
     // `mlar keyderive tempdir/key_parent tempdir/key_tmp --path "Child 2"`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("keyderive")
-        .arg(&key_parent)
-        .arg(&key_tmp)
+        .arg(&key_parent_priv)
+        .arg(&key_tmp_pfx)
         .arg("-p")
         .arg("Child 2");
     cmd.assert().success();
 
-    assert_eq!(keys.child2, fs::read(&key_tmp).unwrap());
+    assert_eq!(keys.child2, fs::read(&key_tmp_priv).unwrap());
 
     // Ensure path is transitive
 
-    let key_tmp2 = output_dir.path().join("key_tmp2");
+    let key_tmp_2_pfx = output_dir.path().join("key_tmp2");
+    let key_tmp_2_priv = key_tmp_2_pfx.with_extension("mlapriv");
     // `mlar keyderive tempdir/key_parent tempdir/key_tmp2 --path "Child 1" --path "Child 1"`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("keyderive")
-        .arg(&key_parent)
-        .arg(&key_tmp2)
+        .arg(&key_parent_priv)
+        .arg(&key_tmp_2_pfx)
         .arg("-p")
         .arg("Child 1")
         .arg("-p")
         .arg("Child 1");
     cmd.assert().success();
 
-    assert_eq!(keys.child1child1, fs::read(&key_tmp2).unwrap());
+    assert_eq!(keys.child1child1, fs::read(&key_tmp_2_priv).unwrap());
 }
 
 #[test]
 fn test_verbose_info() {
-    let ecc_public = Path::new("../samples/test_x25519_pub.pem");
-    let ecc_private = Path::new("../samples/test_x25519.pem");
-    let ecc_public_2 = Path::new("../samples/test_x25519_2_pub.pem");
+    let public_key = Path::new("../samples/test_mlakey.mlapub");
+    let public_key_2 = Path::new("../samples/test_mlakey_2.mlapub");
 
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let testfs = setup();
 
-    // `mlar create -l -o output.mla
+    // `mlar create --unsigned -o output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create").arg("-o").arg(mlar_file.path());
-    cmd.arg("-l").arg("compress");
-    cmd.arg("-l").arg("encrypt");
-    cmd.arg("-p").arg(ecc_public);
-    cmd.arg("-p").arg(ecc_public_2);
+    cmd.arg("--unsigned");
+    cmd.arg("-p").arg(public_key);
+    cmd.arg("-p").arg(public_key_2);
 
-    let mut file_list = String::new();
+    // Build expected stderr with full " adding: ... (size bytes)" lines
+    let mut expected_stderr = String::new();
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
-    // `mlar info -k <key> -i output.mla`
+    // `mlar info -i output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("info")
-        .arg("-k")
-        .arg(ecc_private)
-        .arg("-i")
-        .arg(mlar_file.path());
+    cmd.arg("info").arg("-i").arg(mlar_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     assert.success().stdout(
-        "Format version: 1
+        "Format version: 2
 Encryption: true
-Compression: true
+Signature: false
 ",
     );
 
-    // `mlar info -k <key> -v -i output.mla`
+    // `mlar info -v -i output.mla`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
-    cmd.arg("info")
-        .arg("-k")
-        .arg(ecc_private)
-        .arg("-v")
-        .arg("-i")
-        .arg(mlar_file.path());
+    cmd.arg("info").arg("-v").arg("-i").arg(mlar_file.path());
 
     println!("{cmd:?}");
     let assert = cmd.assert();
@@ -1212,104 +1805,150 @@ Compression: true
 fn test_no_open_on_encrypt() {
     // Create an unencrypted archive
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
-    let ecc_private = Path::new("../samples/test_x25519.pem");
+    let private_key = Path::new("../samples/test_mlakey.mlapriv");
 
     // Create files
     let testfs = setup();
 
-    // `mlar create -o output.mla -l compress file1.bin file2.bin file3.bin`
+    // Prepare expected stderr for create
+    let mut expected_stderr = String::new();
+    expected_stderr.push_str("[WARNING] Output archive will NOT be encrypted!\n");
+    for file in &testfs.files {
+        let entry_name = EntryName::from_path(file.path()).unwrap();
+        let escaped = entry_name.to_pathbuf_escaped_string().unwrap();
+        expected_stderr.push_str(format!(" adding: {escaped}\n").as_str());
+    }
+    expected_stderr.push_str("[WARNING] Output archive was NOT encrypted!\n");
+
+    // `mlar create --unencrypted --unsigned -o output.mla file1.bin file2.bin file3.bin`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
-        .arg("-l")
-        .arg("compress")
+        .arg("--unencrypted")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path());
 
-    let mut file_list = String::new();
     for file in &testfs.files {
         cmd.arg(file.path());
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
     }
 
     println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
+    assert.success().stderr(expected_stderr);
 
     // Ensure:
-    // - mlar refuse to open the MLA file if a private key is provided
+    // - mlar refuses to open the MLA file if a private key is provided
 
-    // `mlar list -i output.mla -k samples/test_x25519.pem`
+    // `mlar list -i output.mla -k samples/test_mlakey.mlapriv`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("list")
         .arg("-i")
         .arg(mlar_file.path())
+        .arg("--skip-signature-verification")
         .arg("-k")
-        .arg(ecc_private);
+        .arg(private_key);
 
     println!("{cmd:?}");
     let assert = cmd.assert();
     assert.failure();
 }
 
-// This value should be bigger than FILE_WRITER_POOL_SIZE
-const TEST_MANY_FILES_NB: usize = 2000;
-
 #[test]
 fn test_extract_lot_files() {
+    // This value should be bigger than FILE_WRITER_POOL_SIZE
+    const TEST_MANY_FILES_NB: usize = 1010;
+    const SIZE_FILE: usize = 10;
+    const SEPARATOR: &str = "SEPARATOR";
+
     let mlar_file = NamedTempFile::new("output.mla").unwrap();
     let mut rng: StdRng = SeedableRng::from_seed([0u8; 32]);
-    let mut files_archive_order = vec![];
     let mut files = vec![];
-    const SIZE_FILE: usize = 10;
+    let mut filenames = vec![];
 
-    // Create many files, filled with a few alphanumeric characters
-    for i in 1..TEST_MANY_FILES_NB {
-        let tmp_file = NamedTempFile::new(format!("file{}.bin", i)).unwrap();
+    // Create many files with random alphanumeric content
+    for i in 0..TEST_MANY_FILES_NB {
+        let tmp_file = NamedTempFile::new(format!("{i}")).unwrap();
         let data: Vec<u8> = Alphanumeric.sample_iter(&mut rng).take(SIZE_FILE).collect();
         tmp_file.write_binary(data.as_slice()).unwrap();
 
-        files_archive_order.push(tmp_file.path().to_path_buf());
-        files.push(tmp_file);
+        files.push((tmp_file, data));
+        filenames.push(format!("{i}"));
     }
 
-    files.sort_by(|i1, i2| Ord::cmp(&i1.path(), &i2.path()));
+    // Concatenate file data separated by SEPARATOR
+    let mut concatenated_data = Vec::new();
+    for (idx, (_tmp_file, data)) in files.iter().enumerate() {
+        if idx > 0 {
+            concatenated_data.extend(SEPARATOR.as_bytes());
+        }
+        concatenated_data.extend(data);
+    }
 
-    let mut testfs = TestFS {
-        files,
-        files_archive_order,
-    };
-
-    // `mlar create -l -o output.mla -
+    // Create archive passing multiple --filenames flags
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("create")
-        .arg("-l")
+        .arg("--unencrypted")
+        .arg("--unsigned")
         .arg("-o")
         .arg(mlar_file.path())
-        .arg("-");
+        .arg("--stdin-data")
+        .arg("--stdin-data-separator")
+        .arg(SEPARATOR);
+    cmd.arg("--stdin-data-entry-names").arg(filenames.join(","));
 
-    // Use "-" to avoid large command line (Windows limitation is about 8191 char)
-    let mut file_list = String::new();
-    for file in &testfs.files {
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
-    }
-    cmd.write_stdin(String::from(&file_list));
+    cmd.arg("-").write_stdin(concatenated_data);
 
-    println!("{:?}", cmd);
+    println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stderr(String::from(&file_list));
 
-    let mut file_list = String::new();
-    for file in &testfs.files {
-        file_list.push_str(format!("{}\n", file.path().to_string_lossy()).as_str());
-    }
+    assert.success();
 
-    // Test global (with all files)
-
-    // `mlar extract -v -i output.mla -o ouput_dir -g '*'`
+    // === 1. Linear extraction ===
     let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("extract")
         .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("-o")
+        .arg(output_dir.path());
+
+    println!("{cmd:?}");
+    let assert = cmd.assert();
+    assert.success();
+
+    for (filename, (_tmp_file, original_data)) in filenames.iter().zip(files.iter()) {
+        let extracted = fs::read(output_dir.path().join(filename)).unwrap();
+        assert_eq!(
+            extracted, *original_data,
+            "Mismatch in linear extract: {filename}"
+        );
+    }
+
+    // === 2. Glob extraction ===
+    let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("extract")
+        .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-o")
@@ -1317,65 +1956,437 @@ fn test_extract_lot_files() {
         .arg("-g")
         .arg("*");
 
-    println!("{:?}", cmd);
+    println!("{cmd:?}");
     let assert = cmd.assert();
-    assert.success().stdout(file_list.clone());
+    let output_str = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    for filename in &filenames {
+        assert!(
+            output_str.contains(filename),
+            "Missing filename in stdout: {filename}",
+        );
+    }
+    for (filename, (_tmp_file, original_data)) in filenames.iter().zip(files.iter()) {
+        let extracted = fs::read(output_dir.path().join(filename)).unwrap();
+        assert_eq!(
+            extracted, *original_data,
+            "Mismatch in glob extract: {filename}"
+        );
+    }
 
-    ensure_directory_content(output_dir.path(), &testfs.files);
+    // === 3. Single file extraction ===
+    let single_file = &filenames[0];
+    let single_file_data = &files[0].1;
 
-    // Test linear extraction of all files
-
-    // `mlar extract -v -i output.mla -o ouput_dir`
     let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("extract")
         .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("-o")
+        .arg(output_dir.path())
+        .arg(single_file);
+
+    println!("{cmd:?}");
+    let assert = cmd.assert();
+    assert.success().stdout(format!("{single_file}\n"));
+
+    let extracted = fs::read(output_dir.path().join(single_file)).unwrap();
+    assert_eq!(
+        extracted, *single_file_data,
+        "Mismatch in single file extract: {single_file}"
+    );
+}
+
+#[test]
+fn test_stdin() {
+    let msg = "echo... echo... echo...";
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    let output_files = ["default-entry"];
+
+    // `echo "echo... echo... echo..." | mlar create --unencrypted --unsigned -o output.mla --filenames file.txt -`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("compress")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .write_stdin(msg);
+
+    println!("{cmd:?}");
+    let assert = cmd.assert();
+    assert.success();
+
+    // `mlar extract -v --accept-unencrypted -i output.mla -o output_dir`
+    let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("extract")
+        .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-o")
         .arg(output_dir.path());
 
-    println!("{:?}", cmd);
+    println!("{cmd:?}");
     let assert = cmd.assert();
-    let expected_output = format!(
-        "Extracting the whole archive using a linear extraction\n{}",
-        file_list
-    );
-    assert.success().stdout(expected_output);
+    assert.success();
 
-    ensure_directory_content(output_dir.path(), &testfs.files);
+    let extracted_file_path = output_dir.path().join(output_files.first().unwrap());
+    let content = fs::read_to_string(&extracted_file_path).unwrap();
+    assert_eq!(content, msg);
+}
 
-    // Test extraction of one file explicitly
-    // `mlar extract -v -i output.mla -o ouput_dir file1`
-    let one_filename = &testfs.files_archive_order[0];
-    let mut one_file = Vec::new();
-    loop {
-        match testfs.files.pop() {
-            None => {
-                break;
-            }
-            Some(ntf) => {
-                if ntf.path() == one_filename {
-                    one_file.push(ntf);
-                }
-            }
-        }
-    }
+#[test]
+fn test_stdin_empty_input() {
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .arg("--stdin-data-entry-names")
+        .arg("empty-entry")
+        .write_stdin(""); // empty input
+
+    cmd.assert().success();
+
     let output_dir = TempDir::new().unwrap();
+
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
     let mut cmd = Command::cargo_bin(UTIL).unwrap();
     cmd.arg("extract")
-        .arg("-v")
+        .arg("--accept-unencrypted")
+        .arg("--skip-signature-verification")
         .arg("-i")
         .arg(mlar_file.path())
         .arg("-o")
-        .arg(output_dir.path())
-        .arg(one_filename);
+        .arg(output_dir.path());
 
-    println!("{:?}", cmd);
+    cmd.assert().success();
+
+    let content = fs::read(output_dir.path().join("empty-entry")).unwrap();
+    assert!(content.is_empty(), "Expected empty file, got {content:?}");
+}
+
+#[test]
+fn test_consecutive_sep_stdin() {
+    let sep = "SEP";
+    let input: &[&[u8]] = &[
+        b"SEP",
+        b"\xff\xfe\xad\xde",
+        b"SEP",
+        b"SEP",
+        b"SEP",
+        b"echo... echo... echo...",
+        b"SEP",
+    ];
+
+    let expected_content: &[&[u8]] = &[
+        b"",
+        b"\xff\xfe\xad\xde",
+        b"",
+        b"",
+        b"echo... echo... echo...",
+        b"",
+    ];
+
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    let output_files = [
+        "chunk1.bin",
+        "chunk2.bin",
+        "chunk3.bin",
+        "chunk4.bin",
+        "chunk5.bin",
+        "chunk6.bin",
+    ];
+
+    // `echo -n -e "SEP\xff\xfe\xad\xdeSEPSEPSEPecho... echo... echo...SEP" | mlar create --unencrypted --unsigned -o output.mla --separator SEP -`
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .arg("--stdin-data-separator")
+        .arg(sep)
+        .arg("--stdin-data-entry-names")
+        .arg(output_files.join(","))
+        .write_stdin(input.concat());
+
+    println!("{cmd:?}");
     let assert = cmd.assert();
-    assert
-        .success()
-        .stdout(format!("{}\n", one_filename.to_string_lossy()));
+    assert.success();
 
-    ensure_directory_content(output_dir.path(), &one_file);
+    // `mlar extract -v --accept-unencrypted -i output.mla -o output_dir`
+    let output_dir = TempDir::new().unwrap();
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("extract")
+        .arg("-v")
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("-o")
+        .arg(output_dir.path());
+
+    println!("{cmd:?}");
+    let assert = cmd.assert();
+    assert.success();
+
+    for (index, file) in output_files.iter().enumerate() {
+        let extracted_file_path = output_dir.path().join(file);
+        let content = fs::read(&extracted_file_path).unwrap();
+        assert_eq!(content, expected_content[index]);
+    }
+}
+
+#[test]
+fn test_stdin_separator_across_chunks() {
+    const SEPARATOR: &str = "SEPARATOR";
+
+    let mut rng: StdRng = SeedableRng::from_seed([0u8; 32]);
+    // 9000 : separator after chunk1
+    // 8190 : separator across chunks
+    for chunk1_size in [9000, 8190] {
+        let mlar_file = NamedTempFile::new("output.mla").unwrap();
+        let stdin1 = Alphanumeric
+            .sample_iter(&mut rng)
+            .take(chunk1_size)
+            .collect::<Vec<u8>>();
+        let stdin2 = Alphanumeric
+            .sample_iter(&mut rng)
+            .take(9000)
+            .collect::<Vec<u8>>();
+        let stdin = [stdin1.as_slice(), SEPARATOR.as_bytes(), stdin2.as_slice()].concat();
+
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("create")
+            .arg("--unencrypted")
+            .arg("--unsigned")
+            .arg("-o")
+            .arg(mlar_file.path())
+            .arg("--stdin-data")
+            .arg("--stdin-data-separator")
+            .arg(SEPARATOR);
+
+        cmd.arg("--stdin-data-entry-names").arg("e1,e2");
+
+        cmd.write_stdin(stdin);
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+
+        assert.success();
+
+        let output_dir = TempDir::new().unwrap();
+        // cf. https://github.com/rust-lang/rust/issues/148426
+        // TODO: check that warning disappears when issue is fixed
+        #[allow(deprecated)]
+        let mut cmd = Command::cargo_bin(UTIL).unwrap();
+        cmd.arg("extract")
+            .arg("-v")
+            .arg("--skip-signature-verification")
+            .arg("--accept-unencrypted")
+            .arg("-i")
+            .arg(mlar_file.path())
+            .arg("-o")
+            .arg(output_dir.path());
+
+        println!("{cmd:?}");
+        let assert = cmd.assert();
+        assert.success();
+
+        for (name, original_data) in ["e1", "e2"].iter().zip([stdin1, stdin2].iter()) {
+            let extracted = fs::read(output_dir.path().join(name)).unwrap();
+            assert_eq!(&extracted, original_data, "Mismatch in extract: {name}");
+        }
+    }
+}
+
+#[test]
+fn test_stdin_separator_not_in_input_should_fallback_to_single_entry() {
+    const SEPARATOR: &str = "SEP";
+    let input = b"This is some data that does not contain the separator.";
+
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .arg("--stdin-data-separator")
+        .arg(SEPARATOR)
+        .arg("--stdin-data-entry-names")
+        .arg("single_entry_expected") // only one entry will actually be created
+        .write_stdin(input)
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_missing_entry_names_should_fail() {
+    let separator = "SEP";
+    let input = b"fooSEPbar";
+
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--stdin-data")
+        .arg("--stdin-data-separator")
+        .arg(separator)
+        .write_stdin(input)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_archive_with_missing_file_should_fail() {
+    // Create a temp output archive file
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    // Create a valid temporary input file
+    let file1 = NamedTempFile::new("file1.txt").unwrap();
+    std::fs::write(&file1, "Test1").unwrap();
+    let missing_file_name = "missing_file.bin";
+
+    // === mlar create ===
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    cmd.arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg(file1.path())
+        .arg(missing_file_name)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_archive_with_missing_file_skips_and_succeeds() {
+    // Create a temp output archive file
+    let mlar_file = NamedTempFile::new("output.mla").unwrap();
+
+    // Create a valid temporary input file
+    let file1 = NamedTempFile::new("file1.txt").unwrap();
+    std::fs::write(&file1, "Test1").unwrap();
+    let file1_name = "file1.txt";
+    let missing_file_name = "missing_file.bin";
+
+    // === mlar create ===
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    let output = cmd
+        .arg("create")
+        .arg("--unencrypted")
+        .arg("--unsigned")
+        .arg("-o")
+        .arg(mlar_file.path())
+        .arg("--skip-not-found")
+        .arg(file1.path())
+        .arg(missing_file_name)
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+
+    let stderr_str = String::from_utf8_lossy(&output);
+
+    // Check that missing file is explicitly reported
+    assert!(
+        stderr_str.contains("does not exist"),
+        "Expected warning for missing file not found in stderr"
+    );
+    assert!(
+        stderr_str.contains("skipping"),
+        "Expected 'skipping' message not found in stderr"
+    );
+    assert!(
+        stderr_str.contains(file1_name),
+        "Expected file1 to be reported in stderr"
+    );
+
+    // === mlar list ===
+    // cf. https://github.com/rust-lang/rust/issues/148426
+    // TODO: check that warning disappears when issue is fixed
+    #[allow(deprecated)]
+    let mut cmd = Command::cargo_bin(UTIL).unwrap();
+    let output = cmd
+        .arg("list")
+        .arg("-i")
+        .arg(mlar_file.path())
+        .arg("--skip-signature-verification")
+        .arg("--accept-unencrypted")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout_str = String::from_utf8_lossy(&output);
+
+    // Check that only the valid file is listed
+    assert!(
+        stdout_str.contains(file1_name),
+        "Expected file1 in archive list output"
+    );
+    assert!(
+        !stdout_str.contains(missing_file_name),
+        "Missing file should not appear in archive list"
+    );
 }
